@@ -12,12 +12,13 @@ Anyone can read and write `.knode` files. Only Knode may change the format and s
 
 | Path | What |
 |---|---|
-| `spec/` | The specification, versioned |
-| `examples/` | Example spaces, to test an implementation against |
+| [`spec/`](spec) | The specification, versioned: [version 0](spec/knode-0.md) |
+| [`examples/`](examples) | Example spaces, to test an implementation against |
 
 ## Status
 
-Version 0, in design. It is frozen as 1.0 before Knode's public beta; until then it can change.
+Version 0 is a draft: read the [specification](spec/knode-0.md). It is frozen as 1.0 before
+Knode's public beta; until then it can change.
 Follow the [roadmap](https://github.com/knodemd/handbook/blob/main/06-roadmap.md).
 
 ## Implementations
