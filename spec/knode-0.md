@@ -7,8 +7,9 @@ The reference implementation is
 
 A `.knode` file is one **space**: a local memory shared by a person and their AI agents. It holds
 **nodes** (notes, ideas, decisions, captured conversations), the **links** between them, who wrote
-each one and from where (**provenance**), every earlier version (**history**), and a full-text
-index to search them.
+each one and from where (**provenance**), structured metadata such as the agent and session of a
+conversation (**properties**), every earlier version (**history**), and a full-text index to
+search them.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
@@ -117,7 +118,7 @@ PRAGMA foreign_keys = ON;    -- deleting a node removes its links and tags
 and SHOULD use `PRAGMA synchronous = NORMAL` and a busy timeout of a few seconds.
 
 **Schema version.** SQLite's `PRAGMA user_version` holds the schema version of the database:
-`1` for the schema in this document. See section 13.
+`2` for the schema in this document. See section 13.
 
 **Text** is UTF-8. **Booleans** are not used. All tables except the full-text index are
 `STRICT`.
@@ -134,9 +135,10 @@ and SHOULD use `PRAGMA synchronous = NORMAL` and a busy timeout of a few seconds
 | `unresolved_links` | `[[links]]` whose target does not exist yet |
 | `history` | Every version of every node, including deleted ones |
 | `nodes_fts` | The FTS5 full-text index of titles and plain text |
+| `properties` | Structured metadata of each node, by key (schema version 2) |
 
 The full SQL is in the [appendix](#appendix-the-schema). A writer MUST create exactly that schema
-for version 1. A reader MUST NOT depend on the order of columns; it reads them by name.
+for the schema version it writes. A reader MUST NOT depend on the order of columns; it reads them by name.
 
 ### 5.1 settings
 
@@ -203,8 +205,8 @@ characters. This version defines:
 
 A reader MUST keep and show kinds it does not know.
 
-**Metadata is never in the body.** Dates, authors, sources, tags and permissions live in columns
-and tables. A body MUST NOT be given YAML frontmatter by a writer; frontmatter is only produced
+**Metadata is never in the body.** Dates, authors, sources, tags, properties (5.9) and
+permissions live in columns and tables. A body MUST NOT be given YAML frontmatter by a writer; frontmatter is only produced
 when a space is exported to Markdown files, and removed on import.
 
 ### 5.4 tags
@@ -278,6 +280,46 @@ Indexed by `(node_id, seq)`. See section 11.
 An FTS5 table indexing `nodes.title` and `nodes.plain`, stored as an external-content table
 over `nodes` (rowid `nodes.seq`), so the text is not stored twice. Triggers on `nodes` keep it
 in step. See section 9.
+
+### 5.9 properties
+
+Added in schema version 2. Structured metadata of a node, one value per key, such as the agent
+and session of a captured conversation.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `node_id` | TEXT | The node, deleted with it |
+| `key` | TEXT | The property name (below) |
+| `value` | TEXT | The value |
+| `updated_at` | INTEGER | When the value was last set, ms UTC |
+| `updated_by` | INTEGER | The provenance of the change that last set it |
+
+Primary key `(node_id, key)`: a node has at most one value for each key. Indexed by
+`(key, value)`, so finding the nodes with a given value, such as the conversation of one agent
+session, is fast in any space.
+
+**Keys** are lower-case ASCII letters, digits, `_`, `.` and `-`, starting with a letter, at most
+64 characters. Dotted prefixes group keys by what they describe. **Values** are text; a
+timestamp is written as RFC 3339 in UTC with milliseconds, such as `2026-10-20T09:30:00.000Z`,
+so values of one key sort by time.
+
+Setting a property does not change the node's `updated_at` and adds nothing to `history`;
+properties carry their own provenance, like links. A reader MUST keep keys it does not know.
+This version defines the keys of a `conversation` node:
+
+| Key | Value |
+|---|---|
+| `conversation.agent` | The agent, as in provenance: `claude-code`, `codex` |
+| `conversation.session` | The agent's id for the session |
+| `conversation.project` | The folder the conversation was held in |
+| `conversation.branch` | The git branch at the start |
+| `conversation.model` | The last model that answered |
+| `conversation.started_at` | When the conversation started |
+| `conversation.ended_at` | When the conversation last had a message |
+
+A conversation captured from an agent session is identified by `conversation.agent` and
+`conversation.session` together: a writer that captures the same session again updates that
+node instead of creating another one.
 
 ## 6. Markdown
 
@@ -472,7 +514,7 @@ Each write is one SQLite transaction, so a failed write changes nothing.
 2. Read the body: plain text (section 8) and `[[links]]` (section 6).
 3. Find or add the provenance row.
 4. Insert into `nodes` with `created_at = updated_at = now` and
-   `created_by = updated_by = provenance`; insert its tags.
+   `created_by = updated_by = provenance`; insert its tags and properties.
 5. Apply its links (7.1), then resolve links waiting for its title (7.3).
 6. Add a `create` row to `history`.
 
@@ -492,10 +534,16 @@ Two numbers describe a space:
   specification. It changes only when a reader of the old version could not safely read the
   new one. This document is format `0`.
 - **The schema version**, `PRAGMA user_version` of `knode.db`: how many migrations have run.
-  This document describes schema version `1`.
+  This document describes schema version `2`.
 
 **Migrations** are numbered from 1. Migration *n* takes the database from schema version *n − 1*
-to *n*. Version 0 is an empty database; migration 1 creates the schema in the appendix.
+to *n*. Version 0 is an empty database; migration 1 creates the tables of version 1 and migration 2
+adds `properties`. Both are in the appendix.
+
+| Migration | Schema version | What it does |
+|---|---|---|
+| 1 | 1 | Creates `settings`, `provenance`, `nodes`, `tags`, `links`, `unresolved_links`, `history` and `nodes_fts` |
+| 2 | 2 | Adds `properties` (5.9) |
 
 When a space is opened:
 
@@ -533,7 +581,9 @@ are.
 
 ## Appendix: the schema
 
-Schema version 1, exactly as migration 1 creates it.
+Schema version 2: migration 1, then migration 2, exactly as written here.
+
+Migration 1:
 
 ```sql
 
@@ -637,4 +687,19 @@ CREATE TRIGGER nodes_fts_update AFTER UPDATE OF title, plain ON nodes BEGIN
     VALUES ('delete', old.seq, old.title, old.plain);
     INSERT INTO nodes_fts (rowid, title, plain) VALUES (new.seq, new.title, new.plain);
 END;
+```
+
+Migration 2:
+
+```sql
+CREATE TABLE properties (
+    node_id    TEXT NOT NULL REFERENCES nodes (id) ON DELETE CASCADE,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by INTEGER NOT NULL REFERENCES provenance (id),
+    PRIMARY KEY (node_id, key)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX properties_key_value ON properties (key, value);
 ```
