@@ -5,8 +5,8 @@ Example `.knode` spaces, small and readable, for testing implementations.
 ## Example.knode
 
 A space for a small side project, a garden planner, written by a person (Ada) and two agents
-(`claude-code` and `codex`). It follows the [specification v0](../spec/knode-0.md) and was
-written by the reference library with
+(`claude-code` and `codex`). It follows the [specification v0](../spec/knode-0.md) at schema
+version 3 and was written by the reference library with
 `cargo run -p knode-format --example example_space -- Example.knode` from
 [knode/core](https://github.com/knodemd/knode/tree/main/core).
 
@@ -28,6 +28,11 @@ What it contains:
   yet. It waits in `unresolved_links` and becomes a link when a node with that title is created.
 - **Provenance:** three rows: Ada, and each agent with its session id and project folder.
 - **History:** six versions: one `create` per node and an `update` of Ideas for v2 by `codex`.
+- **Changes:** nine, one for each write, in order: five `node.create`, three `link.create` and
+  the `node.update` by `codex`. Every version points at its change with `change_id`, and the
+  three links made by hand are kept in `link_history`.
+- **Settings, folders, agents and grants:** none yet, beyond `space.id`: no icon, capture on,
+  and no agent has access to the space.
 - **Tags:** `project`, `architecture`, `database` (twice) and `reference`.
 - **Properties:** the conversation has its agent, session id, project folder, branch, and start
   and end times as properties, not in its body.
@@ -39,6 +44,9 @@ Look inside with the `sqlite3` command:
 
 ```sh
 sqlite3 Example.knode/knode.db "SELECT id, kind, title FROM nodes"
+sqlite3 Example.knode/knode.db \
+  "SELECT c.id, c.action, p.actor, c.subject
+   FROM changes c JOIN provenance p ON p.id = c.changed_by ORDER BY c.id"
 sqlite3 Example.knode/knode.db \
   "SELECT n.title, snippet(nodes_fts, -1, '[', ']', '…', 8)
    FROM nodes_fts JOIN nodes n ON n.seq = nodes_fts.rowid
