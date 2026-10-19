@@ -270,7 +270,8 @@ Primary key `(source_id, target_key)`; indexed by `target_key`.
 
 ### 5.7 history
 
-One row per change to a node, with the whole node as it was after the change. For a delete, the
+One row per change to a node, with the whole node as it was after the change; a run of updates
+by the same agent session may share one row (section 11). For a delete, the
 row holds the node as it was just before it was deleted.
 
 | Column | Type | Meaning |
@@ -519,10 +520,27 @@ Every change to a node adds one row to `history`, in the same transaction as the
   nothing;
 - deleting it adds a `delete` row with the node as it was.
 
-History rows are never changed. The history of a deleted node stays. In schema versions 1 and 2,
-link changes made by hand are not part of the history; links carry their own provenance. From
-schema version 3, every row belongs to a change, links made or removed by hand are kept in
-`link_history`, and changes can be undone (section 17).
+History rows are never changed, with one exception: a **run of session updates**. When an agent
+with a session (a provenance with `actor_kind = 'agent'` and a non-empty `session`) updates a
+node, and the node's newest `history` row is an `update` row with exactly the same provenance
+row, a writer may replace that row instead of adding one: in the same transaction, delete it and
+add the new `update` row, which gets a new `seq`. This keeps one row per run when an agent keeps
+rewriting the same node, such as a conversation captured while it grows, where every version
+is contained in the next one.
+
+- `create` and `delete` rows are never replaced.
+- A row written by any other provenance (a person, another agent or another session) ends the
+  run: it and the row before it stay.
+- So the newest row of a node always holds the node as it is now, and the version that anyone
+  else changed is always in the history, ready to be restored.
+
+A writer chooses when to replace; Knode does it for conversations it captures. Readers need
+nothing new: `history` keeps the same shape and order.
+
+The history of a deleted node stays. In schema versions 1 and 2, link changes made by hand are
+not part of the history; links carry their own provenance. From schema version 3, every row
+belongs to a change (a replaced row's change is replaced with it), links made or removed by hand
+are kept in `link_history`, and changes can be undone (section 17).
 
 ## 12. Writing a node, step by step
 
@@ -540,7 +558,8 @@ Each write is one SQLite transaction, so a failed write changes nothing.
 
 **Update.** Compare each new field with the current one and stop if nothing changes. Write the
 changed fields (a new title also writes `title_key`; a new body also writes `plain` and applies
-its links), set `updated_at` and `updated_by`, add an `update` row to `history`, and on a new
+its links), set `updated_at` and `updated_by`, add an `update` row to `history` (or replace the newest one,
+for a run of session updates, section 11), and on a new
 title rewrite the nodes that link here (7.4) and resolve links waiting for it (7.3).
 
 **Delete.** Turn the mentions of the node into unresolved links (7.5), add a `delete` row to
