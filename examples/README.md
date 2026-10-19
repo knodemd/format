@@ -14,7 +14,7 @@ written by the reference library with
 |---|---|---|---|
 | Garden planner | `note` | Ada | `[[links]]` with a label, tags |
 | SQLite for local data | `decision` | Ada | Headings and lists; a link to the conversation |
-| Conversation: choosing the database | `conversation` | `claude-code` | A captured conversation, with its session and project |
+| Conversation: choosing the database | `conversation` | `claude-code` | A captured conversation, with its session, project and times as properties |
 | Frost dates | `source` | `codex` | A GFM table |
 | Ideas for v2 | `idea` | Ada, then `codex` | Task lists, an unresolved link, two versions in the history |
 
@@ -29,6 +29,8 @@ What it contains:
 - **Provenance:** three rows: Ada, and each agent with its session id and project folder.
 - **History:** six versions: one `create` per node and an `update` of Ideas for v2 by `codex`.
 - **Tags:** `project`, `architecture`, `database` (twice) and `reference`.
+- **Properties:** the conversation has its agent, session id, project folder, branch, and start
+  and end times as properties, not in its body.
 
 The `blobs/` and `sync/` folders are empty in this version; git does not keep empty folders, so
 an implementation creates them when it opens the space.
