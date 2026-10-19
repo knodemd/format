@@ -8,8 +8,9 @@ The reference implementation is
 A `.knode` file is one **space**: a local memory shared by a person and their AI agents. It holds
 **nodes** (notes, ideas, decisions, captured conversations), the **links** between them, who wrote
 each one and from where (**provenance**), structured metadata such as the agent and session of a
-conversation (**properties**), every earlier version (**history**), and a full-text index to
-search them.
+conversation (**properties**), every earlier version and who made it (**history**), a full-text
+index to search them, and, from schema version 3, its settings, the folders that feed it, and
+what each agent may do in it (**grants**).
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
@@ -30,7 +31,10 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in
 12. [Writing a node, step by step](#12-writing-a-node-step-by-step)
 13. [Versions and migrations](#13-versions-and-migrations)
 14. [Reserved for later versions](#14-reserved-for-later-versions)
-15. [Appendix: the schema](#appendix-the-schema)
+15. [Space settings and folders](#15-space-settings-and-folders)
+16. [Agents, keys and grants](#16-agents-keys-and-grants)
+17. [Change history and undo](#17-change-history-and-undo)
+18. [Appendix: the schema](#appendix-the-schema)
 
 ## 1. The package
 
@@ -118,7 +122,7 @@ PRAGMA foreign_keys = ON;    -- deleting a node removes its links and tags
 and SHOULD use `PRAGMA synchronous = NORMAL` and a busy timeout of a few seconds.
 
 **Schema version.** SQLite's `PRAGMA user_version` holds the schema version of the database:
-`2` for the schema in this document. See section 13.
+`3` for the schema in this document. See section 13.
 
 **Text** is UTF-8. **Booleans** are not used. All tables except the full-text index are
 `STRICT`.
@@ -136,6 +140,12 @@ and SHOULD use `PRAGMA synchronous = NORMAL` and a busy timeout of a few seconds
 | `history` | Every version of every node, including deleted ones |
 | `nodes_fts` | The FTS5 full-text index of titles and plain text |
 | `properties` | Structured metadata of each node, by key (schema version 2) |
+| `folders` | The folders that feed the space (schema version 3, 15.2) |
+| `agents` | The agents that may have access to the space (schema version 3, 16.3) |
+| `agent_keys` | Fingerprints of the agents' keys, never the keys (schema version 3, 16.4) |
+| `grants` | What each agent may do in the space: nothing, read or write (schema version 3, 16.5) |
+| `changes` | One row per change, with who made it; what undo works on (schema version 3, 17.1) |
+| `link_history` | Every link made or removed by hand (schema version 3, 17.3) |
 
 The full SQL is in the [appendix](#appendix-the-schema). A writer MUST create exactly that schema
 for the schema version it writes. A reader MUST NOT depend on the order of columns; it reads them by name.
@@ -152,6 +162,8 @@ Defined keys:
 | Key | Value |
 |---|---|
 | `space.id` | The `id` from `manifest.json`. Written when the space is created; never changes |
+| `space.icon` | The icon of the space (schema version 3, 15.1) |
+| `capture.enabled` | Whether captured conversations are written to the space (schema version 3, 15.1) |
 
 Keys a reader does not know MUST be kept. Later versions add settings here (section 14).
 
@@ -273,8 +285,10 @@ row holds the node as it was just before it was deleted.
 | `title` | TEXT | The node's title |
 | `body` | TEXT | The node's Markdown body |
 | `tags` | TEXT | The node's tags, a JSON array of strings, sorted |
+| `change_id` | INTEGER | The change the row belongs to (schema version 3, 17.2) |
+| `restored_from` | INTEGER, or NULL | The row whose content this one puts back (schema version 3, 17.2) |
 
-Indexed by `(node_id, seq)`. See section 11.
+Indexed by `(node_id, seq)` and, from schema version 3, `change_id`. See sections 11 and 17.
 
 ### 5.8 nodes_fts
 
@@ -492,6 +506,10 @@ Every write records who made it and from where:
 A writer looks up the row with the same four values and inserts it if missing; nodes
 (`created_by`, `updated_by`), links (`created_by`) and history (`changed_by`) point at it.
 
+From schema version 3, an agent that writes through Knode Service is recorded with the name of
+the agent its key belongs to, not a name it gives for itself (16.7), and every write is also a
+row of `changes` (17.1).
+
 ## 11. History
 
 Every change to a node adds one row to `history`, in the same transaction as the change:
@@ -519,8 +537,10 @@ is contained in the next one.
 A writer chooses when to replace; Knode does it for conversations it captures. Readers need
 nothing new: `history` keeps the same shape and order.
 
-The history of a deleted node stays. Link changes made by hand
-are not part of the history in this version; links carry their own provenance.
+The history of a deleted node stays. In schema versions 1 and 2, link changes made by hand are
+not part of the history; links carry their own provenance. From schema version 3, every row
+belongs to a change (a replaced row's change is replaced with it), links made or removed by hand
+are kept in `link_history`, and changes can be undone (section 17).
 
 ## 12. Writing a node, step by step
 
@@ -545,6 +565,10 @@ title rewrite the nodes that link here (7.4) and resolve links waiting for it (7
 **Delete.** Turn the mentions of the node into unresolved links (7.5), add a `delete` row to
 `history`, then delete the row from `nodes`.
 
+**From schema version 3**, each of these writes also adds its row to `changes` first (17.1), and
+points its `history` rows at it; a delete also adds a `link_history` row for each of the node's
+links other than `mentions` (17.3).
+
 ## 13. Versions and migrations
 
 Two numbers describe a space:
@@ -553,16 +577,32 @@ Two numbers describe a space:
   specification. It changes only when a reader of the old version could not safely read the
   new one. This document is format `0`.
 - **The schema version**, `PRAGMA user_version` of `knode.db`: how many migrations have run.
-  This document describes schema version `2`.
+  This document describes schema version `3`.
 
 **Migrations** are numbered from 1. Migration *n* takes the database from schema version *n − 1*
-to *n*. Version 0 is an empty database; migration 1 creates the tables of version 1 and migration 2
-adds `properties`. Both are in the appendix.
+to *n*. Version 0 is an empty database; migration 1 creates the tables of version 1, migration 2
+adds `properties`, and migration 3 adds settings, folders, agents, grants and changes. All are in
+the appendix.
 
 | Migration | Schema version | What it does |
 |---|---|---|
 | 1 | 1 | Creates `settings`, `provenance`, `nodes`, `tags`, `links`, `unresolved_links`, `history` and `nodes_fts` |
 | 2 | 2 | Adds `properties` (5.9) |
+| 3 | 3 | Adds `folders` (15), `agents`, `agent_keys` and `grants` (16), `changes` and `link_history`, and `change_id` and `restored_from` to `history` (17). Makes every existing version a change of its own |
+
+**Moving to schema version 3.** Migration 3 only adds, as the rules below require:
+
+- Nothing written before it changes meaning. Every existing `history` row becomes one change,
+  numbered like the row, with the row's time, provenance and operation (`node.create`,
+  `node.update` or `node.delete`); this records what was already there, so it is not a
+  `system` change.
+- A space with no `space.icon`, `capture.enabled` or folders behaves as in version 2: no icon,
+  capture on, captured conversations go to the default space.
+- A space with no agents and no grants is invisible to every agent (16.6). An implementation
+  that upgrades from a version without keys SHOULD offer the person to connect the agents
+  already set up and to give them the access they had, rather than give it silently.
+- Readers of schema version 2 or older refuse a space at version 3 (step 2 below), so no older
+  writer can write to it without adding changes.
 
 When a space is opened:
 
@@ -585,22 +625,447 @@ Rules for later versions:
 
 ## 14. Reserved for later versions
 
-These are part of the design but not of version 0. Readers of version 0 MUST leave them as they
-are.
+These are part of the design but not of version 0 yet. Readers of version 0 MUST leave them as
+they are.
 
 | What | Where | Planned |
 |---|---|---|
 | Attachments by hash | `blobs/` | v0.3 |
 | Sync as Loro updates | `sync/` | v0.4 |
 | Embeddings for semantic search (sqlite-vec) | new tables in `knode.db` | v0.3 |
-| Folders that feed a space; capture off per project | new tables and settings | v0.2 |
-| Permissions per agent: read, write or nothing | new tables | v0.2 |
 | Saved positions on the map and canvas | new tables | v0.3 |
 | Encryption metadata | `manifest.json` and settings | v0.4 |
 
+## 15. Space settings and folders
+
+Added in schema version 3. Each space keeps its own settings and the list of folders that feed
+it, so a space read on another machine, or by another implementation, behaves the same.
+
+### 15.1 Settings
+
+Settings live in the `settings` table (5.1). Schema version 3 defines these keys:
+
+| Key | Value | When absent |
+|---|---|---|
+| `space.id` | The `id` from `manifest.json` (5.1) | Never absent |
+| `space.icon` | The icon of the space: one emoji, such as `🌱` | No icon: readers show their default icon |
+| `capture.enabled` | `on` or `off`: whether conversations captured from agents are written to this space at all (15.5) | `on` |
+
+- The **name** of a space stays in `manifest.json` (section 2), so a list of spaces can be shown
+  without opening each database. Renaming a space rewrites the manifest; it is not a setting.
+- An absent key has the default above. A writer SHOULD NOT write a key only to store its
+  default.
+- A value a reader does not understand (an icon that is not one emoji, a `capture.enabled` that
+  is not `on` or `off`) is treated as the default and kept as it is. For `capture.enabled`, any
+  value other than `on` means the same as `off` for a writer of captured conversations: when in
+  doubt, nothing is captured.
+- Every change to a setting is recorded as a change (17.1) with action `settings.set`, the key
+  as `subject` and `{"value": ...}` as `detail`.
+
+### 15.2 folders
+
+The folders on disk that feed the space: projects whose conversations are captured into it,
+folders of notes it imports, and folders where an agent keeps its sessions.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | TEXT, primary key | The folder's id, a ULID |
+| `kind` | TEXT | What the folder is (below) |
+| `path` | TEXT | Where it is, as recorded in 15.3 |
+| `capture` | TEXT | `on` or `off`. Default `on` |
+| `rules` | TEXT | A JSON object with the rules of 15.4. Default `{}` |
+| `created_at` | INTEGER | When it was added, ms UTC |
+| `created_by` | INTEGER | The provenance of the change that added it |
+| `updated_at` | INTEGER | When it last changed, ms UTC |
+| `updated_by` | INTEGER | The provenance of the last change |
+
+`(kind, path)` is unique. Kinds follow the naming rule of node kinds (5.3). This version defines:
+
+| Kind | Meaning | `capture = off` means |
+|---|---|---|
+| `project` | A folder people and agents work in, such as a code repository. Conversations held in it, or in any folder inside it, are captured into this space (15.5) | Nothing from conversations held in it is stored, in this space or any other |
+| `notes` | A folder of Markdown files whose notes are imported into the space ([decision 0006](https://github.com/knodemd/handbook/blob/main/decisions/0006-markdown.md)) | The folder is not read |
+| `agent` | A folder where an agent keeps its sessions, read by capture in addition to the agent's usual folders. `rules.agent` names the agent | The folder is not read |
+
+- A reader MUST keep folders of kinds it does not know, and MUST NOT act on them.
+- A folder that does not exist on the machine reading the space is kept and skipped, not an
+  error. An app MAY show it as missing.
+- Folders are only added, changed and removed by a person (16.6). Each such change is
+  recorded as a change (17.1) with action `folder.set` or `folder.remove` and the folder's `id`
+  as `subject`. Removing a folder deletes its row; nothing already captured or imported from it
+  is removed.
+
+### 15.3 Paths across machines
+
+A space moves between machines (sync, a copy, a backup), and the same project usually sits under
+a different home folder on each one. Paths are recorded so they still match there.
+
+**Recording.** A path is first made absolute and normal: `/` separators (a Windows drive is
+written `C:/...`), no `.` or `..` parts, no trailing `/`, Unicode NFC. Symbolic links are not
+resolved: the path is the one the person chose. Then:
+
+- a path inside the home folder of the person who adds it is stored relative to it, starting with
+  `~/`, such as `~/Developer/knode`; the home folder itself is `~`;
+- any other path is stored absolute, such as `/Volumes/Work/site`.
+
+**Matching.** To find the folder a local path belongs to, the local path is recorded the same
+way, with the local home folder. A folder matches when the recorded local path equals its `path`,
+or starts with its `path` followed by `/`. The comparison is exact (case-sensitive) on the
+recorded text. When several folders match, the one with the longest `path` wins.
+
+For example, on a machine whose home is `/Users/ada`, a conversation held in
+`/Users/ada/Developer/knode/core` is recorded as `~/Developer/knode/core` and belongs to the
+`project` folder `~/Developer/knode`; on another machine whose home is `/home/ada`, the same
+folder matches `/home/ada/Developer/knode/core`.
+
+### 15.4 Rules
+
+`folders.rules` is a JSON object. A reader MUST keep keys it does not know and ignore them. This
+version defines:
+
+| Key | Value | Kinds | When absent |
+|---|---|---|---|
+| `include` | Array of glob patterns | `notes` | `["**/*.md"]`: every Markdown file |
+| `exclude` | Array of glob patterns | `project`, `notes` | `[]`. For `notes`, matching files and folders are not read. For `project`, a conversation held in a matching folder is treated as if the project's `capture` were `off` |
+| `agent` | An agent name, as in provenance (`claude-code`, `codex`) | `agent` | Required: a folder of kind `agent` without it is skipped |
+
+Patterns are matched against the path relative to the folder, with `/` separators: `*` matches
+any characters except `/`, `**` matches any number of folders (including none), and `?` matches
+one character. A folder `node_modules` and everything in it is excluded by `node_modules/**`.
+
+### 15.5 Capture routing
+
+When capture finds a conversation, it decides where it goes from the folder the conversation was
+held in (for an agent session, its working directory) and the folders of every space the
+implementation knows (for Knode Service, its list of spaces):
+
+1. Find the `project` folders, in all those spaces, that match the conversation's folder (15.3),
+   and keep the most specific ones: those with the longest `path`. The same path may be a
+   project of more than one space.
+2. If there are any, the conversation is written to each of their spaces where the folder's
+   `capture` is `on`, the folder is not excluded by its `rules`, and the space's
+   `capture.enabled` is `on`. If none of them qualifies, the conversation is **not stored
+   anywhere**: capture off for a project means nothing of it is kept, not that it goes
+   somewhere else.
+3. If no `project` folder matches and the conversation was read from an `agent` folder of a
+   space (with `capture` on), it goes to that space; otherwise to the default space of the
+   implementation (for Knode, `default_space` in its configuration). In both cases only if that
+   space's `capture.enabled` is `on`.
+
+A conversation that is not stored MUST NOT leave anything in any space: no node, no property,
+no history row. An implementation MAY keep, outside every space, how far it has read each
+session, so it does not read it again.
+
+## 16. Agents, keys and grants
+
+Added in schema version 3. Each agent proves who it is with its own key, and each space says
+what each agent may do in it: nothing, read, or write. The model and its reasons are in
+[decision 0008](https://github.com/knodemd/handbook/blob/main/decisions/0008-permissions.md).
+
+### 16.1 The model
+
+- An **agent** is a program that reads and writes spaces through Knode Service, such as Claude
+  Code connected with `knode mcp`. The same program connected twice (say, for work and for
+  personal projects) is two agents, each with its own key.
+- A **key** is a secret the agent presents when it connects. Spaces only hold its
+  **fingerprint**; the key itself never goes into a package (16.2).
+- A **grant** gives one agent one level in one space: `none`, `read` or `write`. The space is the
+  one that holds the row. An agent without a grant in a space has `none` there.
+- **People are not agents.** The app and the CLI act for the person who owns the spaces and are
+  not limited by grants. Only a person adds agents, issues and revokes keys, and changes grants.
+
+### 16.2 Keys
+
+- **Making a key.** A key is 32 bytes from a cryptographically secure random generator, written
+  as `knk_` followed by 64 lower-case hexadecimal digits. Knode Service makes one when a person
+  connects an agent (for example with `knode connect claude-code`) and when a key is rotated.
+- **Fingerprint.** The fingerprint of a key is `sha256:` followed by the lower-case hexadecimal
+  SHA-256 of the key's text (UTF-8, including `knk_`). The key
+  `knk_0000000000000000000000000000000000000000000000000000000000000000` has the fingerprint
+  `sha256:2d8e7ee0d1fd2f7fa95d62fff7405c54a6c86833c447fe84c53f2de800dfb3a1`. A key has 256
+  random bits, so a plain hash is enough to make the fingerprint useless for finding the key;
+  no salt or slow hash is needed.
+- **Where keys live.** A key is stored only on the machine where it was made, outside every
+  package: in the system's credential store (the Keychain on macOS, the Secret Service on
+  Linux), or, where there is none, in a file under `$KNODE_HOME` that only its owner can read.
+  An implementation MUST NOT write a key into a package (its database, manifest, `blobs/`,
+  `sync/` or any other file), into a log, or into an export. Packages are synced and shared;
+  fingerprints are safe to share, keys are not.
+- **Rotating a key.** A new key is made, its fingerprint added, and the old one revoked, in one
+  change (17.1). The agent keeps its id, name and grants.
+- **Revoking a key.** Its row gets `revoked_at` and `revoked_by`; the row is never deleted, and a
+  revoked fingerprint never becomes valid again. Removing an agent is revoking all its keys and
+  setting its grants to `none`; the agent's row stays, so its past changes still have a name.
+- **Copying to spaces.** When an agent is given a grant in a space, Knode Service writes the
+  agent's row and the fingerprints of its keys into that space. When a key is revoked, it writes
+  the revocation into every space it knows that lists the key. A space that is synced or copied
+  carries the revocation with it, so a key revoked on one machine is refused on every machine
+  that opens the space.
+
+### 16.3 agents
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | TEXT, primary key | The agent's id, a ULID. The same in every space the agent has a grant in |
+| `name` | TEXT, unique | The agent's name, used as `provenance.actor` for its changes (16.7). Follows the naming rule of node kinds (5.3), up to 64 characters. Never changes |
+| `kind` | TEXT | The program, as in provenance: `claude-code`, `codex`, `gemini-cli` |
+| `created_at` | INTEGER | When it was added to this space, ms UTC |
+| `created_by` | INTEGER | The provenance of the person who added it |
+
+The first agent of a kind is usually named after it (`claude-code`); a second one gets another
+name (`claude-code-work`). Rows are never deleted.
+
+### 16.4 agent_keys
+
+| Column | Type | Meaning |
+|---|---|---|
+| `fingerprint` | TEXT, primary key | The key's fingerprint (16.2) |
+| `agent_id` | TEXT | The agent the key belongs to |
+| `created_at` | INTEGER | When the key was made, ms UTC |
+| `created_by` | INTEGER | The provenance of the person who connected the agent |
+| `revoked_at` | INTEGER, or NULL | When the key was revoked, ms UTC; NULL while it is valid |
+| `revoked_by` | INTEGER, or NULL | The provenance of the person who revoked it |
+
+Indexed by `agent_id`. An agent may have more than one valid key, such as one per machine.
+
+### 16.5 grants
+
+| Column | Type | Meaning |
+|---|---|---|
+| `agent_id` | TEXT, primary key | The agent |
+| `level` | TEXT | `none`, `read` or `write` |
+| `updated_at` | INTEGER | When the level was set, ms UTC |
+| `updated_by` | INTEGER | The provenance of the person who set it |
+
+No row and `none` mean the same; a row with `none` records that access was taken away. `write`
+includes `read`.
+
+### 16.6 What Knode Service checks
+
+**When an agent connects**, it presents its key. Knode Service computes the fingerprint and looks
+for it among the agents of its machine. A connection with no key, or with a key it does not
+know, is refused: the agent is told to connect with `knode connect`.
+
+**On every call**, not once per connection, so that a revocation or a lower grant takes effect
+on the next call, and for every space the call names, lists or searches:
+
+1. The fingerprint MUST be in the space's `agent_keys`, for the same agent, with `revoked_at`
+   NULL. Otherwise the agent's level in that space is `none`.
+2. The level is the agent's row in `grants`, or `none` when there is none.
+3. With `none`, the space is **invisible**: it is left out of every list, search and
+   notification, and a call that names it fails exactly as for a space that does not exist,
+   with the same error and message. An agent cannot tell a space it may not see from one that
+   is not there.
+4. With `read`, calls that read are allowed and calls that write fail with a permission error.
+5. With `write`, calls that read and calls that write are allowed.
+
+| Level | Allowed calls (socket methods of Knode Service, and the MCP tools on top of them) |
+|---|---|
+| `none` | Nothing. The space is invisible |
+| `read` | `node.get`, `links.from`, `links.back`, `search`, `recent`, `history`, reading properties, and `subscribe` notifications for the space |
+| `write` | Everything `read` allows, plus `node.create`, `node.update`, `node.delete`, `link.create`, `link.delete`, setting and removing properties, undo (17.4) and restore (17.5) |
+
+Whatever its level, an agent MUST NOT be able to create a space, change settings (15.1) or
+folders (15.2), add agents, issue or revoke keys, change grants, or purge history (17.7). These
+are for people only.
+
+### 16.7 Provenance of agents
+
+A change made by an agent is recorded with `actor_kind = agent` and, as `actor`, the `name` of
+the agent its key belongs to (16.3), never a name the client gives for itself. `session` and
+`source` are filled as before (section 10). A provenance row whose `actor_kind` is `agent` and
+whose `actor` equals an agent's `name` belongs to that agent, including rows written before the
+agent had a key: an agent named `claude-code` owns the changes `claude-code` made before schema version 3.
+
+### 16.8 What is logged
+
+- **In the space:** every write is a change (17.1) with the provenance of whoever made it, and
+  every change to agents, keys and grants is a change too: `agent.add` (subject: the agent id),
+  `agent.key.add` and `agent.key.revoke` (subject: the fingerprint), and `grant.set` (subject:
+  the agent id, detail: `{"level": "read", "previous": "none"}`).
+- **On the machine, outside every space:** Knode Service keeps an access log under
+  `$KNODE_HOME`, with one entry per call: the time, the agent's id, the space's id, the method,
+  and the outcome (`allowed`, `denied` or `invisible`). The log MUST NOT contain keys, node
+  content or search queries. Reads are not recorded in the space: it is synced and shared, and a
+  record of every read would grow without end.
+
+### 16.9 What grants do not do
+
+Grants decide what an agent can do **through Knode Service**. They are not a sandbox: a program
+that runs as the person can read the package directly, or run the `knode` CLI, which acts for the
+person. Grants keep each agent to the spaces it was given and record what it did; keeping a
+program away from the files is the operating system's job. Whoever can write to a package can
+also change its grants; a package is protected by who can reach it, and, from v0.4, by
+encryption.
+
+## 17. Change history and undo
+
+Added in schema version 3. Every change to a node or a link is kept, with who made it and when,
+so any of them can be undone and traced. Undo never deletes history: it is one more change.
+
+### 17.1 changes
+
+One row per change: one write that a person or an agent asked for, made in one transaction.
+Every row that a change adds to `history` and `link_history` points at it.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | INTEGER, primary key, autoincrement | Order of the change in the space; it only grows |
+| `changed_at` | INTEGER | When, ms UTC |
+| `changed_by` | INTEGER | The provenance of the change |
+| `action` | TEXT | What was done (below) |
+| `subject` | TEXT, `''` for none | What it was done to: a node id, a folder id, an agent id, a setting key, a fingerprint |
+| `undoes` | INTEGER, or NULL | For an `undo`, the change it undoes |
+| `detail` | TEXT | A JSON object with details of the action. Default `{}` |
+
+Indexed by `(subject, id)`, `undoes` and `changed_at`. Actions use the naming rule of kinds with
+`.` between parts. This version defines:
+
+| Action | Subject | Made when |
+|---|---|---|
+| `node.create` | The node | A node is created (with its properties, links and tags) |
+| `node.update` | The node | A node's kind, title, body or tags change. A rename's rewritten bodies (7.4) are part of the same change |
+| `node.delete` | The node | A node is deleted |
+| `node.restore` | The node | A node is put back to an earlier version, or recovered after a delete (17.5) |
+| `node.purge` | The node | A node and its history are erased (17.7) |
+| `link.create` | The source node | A link is made by hand |
+| `link.delete` | The source node | A link is removed by hand |
+| `undo` | The subject of the undone change | A change is undone (17.4) |
+| `import` | `''` | Many nodes are written at once, such as an import of Markdown files |
+| `settings.set` | The key | 15.1 |
+| `folder.set`, `folder.remove` | The folder | 15.2 |
+| `agent.add`, `agent.key.add`, `agent.key.revoke`, `grant.set` | 16.8 | 16.8 |
+| `migrate` | `''` | A migration rewrites data (section 13), with provenance `system`/`knode` |
+
+A reader MUST keep and show actions it does not know. Setting or removing properties alone adds
+no change (5.9): properties carry their own provenance, like links did before this version.
+
+A writer at schema version 3 MUST add exactly one `changes` row for each write in this table, in
+the same transaction as the write, and MUST point every `history` and `link_history` row the
+write adds at it.
+
+### 17.2 history, from schema version 3
+
+`history` (5.7) gains two columns:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `change_id` | INTEGER | The change the row belongs to. NULL only in rows written before schema version 3, and migration 3 fills those |
+| `restored_from` | INTEGER, or NULL | When the row puts back an earlier version (17.4, 17.5), the `seq` of the row whose content it restores |
+
+Each row still holds the node **after** the change (or, for `delete`, just before it). The
+**previous value** of a row is the row before it for the same node (the highest lower `seq` with
+the same `node_id`); a `create` has none. `changed_at` and `changed_by` stay, equal to those of
+the change.
+
+### 17.3 link_history
+
+Every link made or removed by hand, kept like the versions of nodes.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `seq` | INTEGER, primary key, autoincrement | Order of the row in the space |
+| `change_id` | INTEGER | The change |
+| `op` | TEXT | `create` or `delete` |
+| `source_id` | TEXT | The link's source. Not a foreign key: history outlives the node |
+| `kind` | TEXT | The link's kind |
+| `target_id` | TEXT | The link's target. Not a foreign key |
+
+Indexed by `change_id`, `(source_id, seq)` and `(target_id, seq)`.
+
+- Only links of kinds other than `mentions` are recorded. `mentions` links come from bodies
+  (section 7), and every body is already in `history`, so they can always be computed again.
+- When a node is deleted, each of its links other than `mentions`, in either direction, gets a
+  `delete` row in the same change, so the delete can be undone with its links.
+
+### 17.4 Undo
+
+To **undo** a change C is to make a new change U, with action `undo`, `undoes` set to C's `id`,
+and the provenance of whoever asked for it, that puts back everything C touched as it was just
+before C:
+
+- **Each node C has a `history` row for.** Its version before C is its latest row with a lower
+  `seq` than C's first row for it.
+  - C created the node (no earlier row, or the earlier row is a `delete`): U deletes it.
+  - C deleted the node: U creates it again, with the same id, from C's `delete` row.
+  - Otherwise: U updates it to its version before C.
+  - The rows U adds that put back a version have `restored_from` set to the row they put
+    back; a `delete` row added by U has none.
+- **Each `link_history` row of C**, the other way round: a link C created is deleted if it
+  still exists; a link C deleted is made again if both nodes exist, with the provenance of U.
+- **Nodes are written as in section 12**, with one exception: a title put back by an undo does not
+  rewrite the bodies that link to it (7.4), because the bodies C rewrote are put back from their
+  own versions. Links from bodies (7.1) and links waiting for a title (7.3) are worked out as
+  for any write.
+
+Rules:
+
+- **Conflicts.** If a node or link that C touched has been changed by a later change, the undo
+  would overwrite someone's later work. A writer MUST NOT apply it without the person's
+  confirmation; to an agent it fails with an error that names the later changes. Restoring a
+  version (17.5) is the way to go back past later changes on purpose.
+- **Once.** A change that has an undo (a change whose `undoes` is its id) that has not itself
+  been undone MUST NOT be undone again. Undoing the undo redoes the change.
+- **What can be undone:** changes with actions `node.create`, `node.update`, `node.delete`,
+  `node.restore`, `link.create`, `link.delete`, `undo` and `import`. Any other change MUST NOT
+  be undone through undo; settings, folders, agents, keys and grants are simply changed again.
+- **Nothing is removed.** Undo never deletes or changes rows of `changes`, `history` or
+  `link_history`.
+
+### 17.5 Restoring a version
+
+To put a node back to an earlier version R (a row of its `history`) is to make a change with
+action `node.restore` and the node as `subject`, which writes R's kind, title, body and tags as
+an `update` row (a `create` row if the node is deleted now), with `restored_from` set to R's
+`seq`. It is written as an ordinary update: a restored title renames, and rewrites the bodies
+that link to the node (7.4).
+
+**Recovering a deleted node** is restoring it to its `delete` row. The node keeps its id, so links
+written by id and `[[links]]` waiting for its title come back (7.3). The links other than
+`mentions` that the delete removed (the `delete` rows of `link_history` in the change that deleted
+it) are made again when both nodes exist.
+
+### 17.6 Who changed what
+
+The history of a node is its `history` rows joined to `changes` and `provenance`, and, for an
+agent, to `agents` by name (16.7). For example, Ada writes a note, `claude-code` adds a line
+in a session, and Ada undoes it:
+
+`changes`:
+
+| id | changed_by | action | subject | undoes |
+|---|---|---|---|---|
+| 41 | person `Ada` | `node.create` | `01M5B425TNF334HAF0FXPS05AZ` | |
+| 42 | agent `claude-code`, session `5f1c...` | `node.update` | `01M5B425TNF334HAF0FXPS05AZ` | |
+| 43 | person `Ada` | `undo` | `01M5B425TNF334HAF0FXPS05AZ` | 42 |
+
+`history` of the node (`kind`, `title` and `tags` left out):
+
+| seq | change_id | op | body | restored_from |
+|---|---|---|---|---|
+| 57 | 41 | `create` | `Beds: tomato, basil.` | |
+| 58 | 42 | `update` | `Beds: tomato, basil. Add mint.` | |
+| 59 | 43 | `update` | `Beds: tomato, basil.` | 57 |
+
+The previous value of row 58 is row 57; row 59 says it puts back row 57, as part of a change that
+undoes change 42 and was made by Ada.
+
+### 17.7 Retention
+
+- **Everything is kept by default.** A writer MUST NOT delete or change rows of `changes`,
+  `history` or `link_history`, except to purge.
+- **Purge.** A person, never an agent, MAY erase a node and all of its versions for good, for
+  example after pasting a secret into it. Purging deletes the node if it exists, its rows in
+  `history`, and the rows of `link_history` where it is the source or the target, and adds a
+  change with action `node.purge` and the node as `subject`, holding no content. The `changes`
+  rows of earlier changes stay: they hold no content. A purged node cannot be restored, and an
+  undo that would need its versions MUST be refused.
+- **No compaction in this version.** Later versions may define how old versions are compacted;
+  until then a space keeps every version of every node.
+
 ## Appendix: the schema
 
-Schema version 2: migration 1, then migration 2, exactly as written here.
+Schema version 3: migrations 1, 2 and 3, in order, exactly as written here.
 
 Migration 1:
 
@@ -721,4 +1186,90 @@ CREATE TABLE properties (
 ) STRICT, WITHOUT ROWID;
 
 CREATE INDEX properties_key_value ON properties (key, value);
+```
+
+Migration 3:
+
+```sql
+-- Space settings and folders (section 15).
+CREATE TABLE folders (
+    id         TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 26),
+    kind       TEXT NOT NULL,
+    path       TEXT NOT NULL,
+    capture    TEXT NOT NULL DEFAULT 'on' CHECK (capture IN ('on', 'off')),
+    rules      TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES provenance (id),
+    updated_at INTEGER NOT NULL,
+    updated_by INTEGER NOT NULL REFERENCES provenance (id),
+    UNIQUE (kind, path)
+) STRICT;
+
+-- Agents, keys and grants (section 16). Keys themselves are never stored here.
+CREATE TABLE agents (
+    id         TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 26),
+    name       TEXT NOT NULL UNIQUE,
+    kind       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES provenance (id)
+) STRICT;
+
+CREATE TABLE agent_keys (
+    fingerprint TEXT PRIMARY KEY NOT NULL
+                CHECK (length(fingerprint) = 71 AND substr(fingerprint, 1, 7) = 'sha256:'),
+    agent_id    TEXT NOT NULL REFERENCES agents (id),
+    created_at  INTEGER NOT NULL,
+    created_by  INTEGER NOT NULL REFERENCES provenance (id),
+    revoked_at  INTEGER,
+    revoked_by  INTEGER REFERENCES provenance (id)
+) STRICT;
+
+CREATE INDEX agent_keys_agent ON agent_keys (agent_id);
+
+CREATE TABLE grants (
+    agent_id   TEXT PRIMARY KEY NOT NULL REFERENCES agents (id),
+    level      TEXT NOT NULL CHECK (level IN ('none', 'read', 'write')),
+    updated_at INTEGER NOT NULL,
+    updated_by INTEGER NOT NULL REFERENCES provenance (id)
+) STRICT;
+
+-- Change history and undo (section 17).
+CREATE TABLE changes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    changed_at INTEGER NOT NULL,
+    changed_by INTEGER NOT NULL REFERENCES provenance (id),
+    action     TEXT NOT NULL,
+    subject    TEXT NOT NULL DEFAULT '',
+    undoes     INTEGER REFERENCES changes (id),
+    detail     TEXT NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE INDEX changes_subject ON changes (subject, id);
+CREATE INDEX changes_undoes ON changes (undoes) WHERE undoes IS NOT NULL;
+CREATE INDEX changes_changed_at ON changes (changed_at);
+
+ALTER TABLE history ADD COLUMN change_id INTEGER REFERENCES changes (id);
+ALTER TABLE history ADD COLUMN restored_from INTEGER REFERENCES history (seq);
+
+CREATE INDEX history_change ON history (change_id);
+
+CREATE TABLE link_history (
+    seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+    change_id INTEGER NOT NULL REFERENCES changes (id),
+    op        TEXT NOT NULL CHECK (op IN ('create', 'delete')),
+    source_id TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    target_id TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX link_history_change ON link_history (change_id);
+CREATE INDEX link_history_source ON link_history (source_id, seq);
+CREATE INDEX link_history_target ON link_history (target_id, seq);
+
+-- Every version written before schema version 3 becomes a change of its own,
+-- with the same number as its history row.
+INSERT INTO changes (id, changed_at, changed_by, action, subject)
+SELECT seq, changed_at, changed_by, 'node.' || op, node_id FROM history ORDER BY seq;
+
+UPDATE history SET change_id = seq;
 ```
