@@ -1,0 +1,3 @@
+# SQLite files that exist only while a database is open
+*.db-wal
+*.db-shm
