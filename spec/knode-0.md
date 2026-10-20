@@ -360,6 +360,21 @@ A conversation captured from an agent session is identified by `conversation.age
 `conversation.session` together: a writer that captures the same session again updates that
 node instead of creating another one.
 
+Knode's Markdown import and export (folders of `.md` files, such as an Obsidian vault) keep these
+keys, under `markdown.`, for what a file has that the node does not:
+
+| Key | Value |
+|---|---|
+| `markdown.path` | The file the node was last imported from, relative to the folder, with `/` between folders, such as `Projects/Plan.md`. An export writes the node to the same path while its title still fits the file name |
+| `markdown.style` | `vault` for a node imported from a file whose frontmatter Knode did not write. Such a node is exported with that frontmatter, as it was |
+| `markdown.frontmatter` | The frontmatter entries of the file Knode does not read, exactly as written, to be written back on export |
+
+Earlier versions of Knode could not keep the ids of imported nodes (12) and kept the file's
+instead in `markdown.id`, with its dates in `markdown.created` and `markdown.updated` and the time
+the node was written from it in `markdown.written`. A writer SHOULD NOT write these keys any more;
+a reader MAY use `markdown.id` to match the files of such a copy to its nodes. The values of
+`markdown.*` keys are not written to the `properties` of an exported file.
+
 ## 6. Markdown
 
 The body of every node is Markdown, stored as text in `nodes.body`. The dialect is:
@@ -596,6 +611,16 @@ title rewrite the nodes that link here (7.4) and resolve links waiting for it (7
 **Delete.** Turn the mentions of the node into unresolved links (7.5), add a `delete` row to
 `history`, then delete the row from `nodes`.
 
+**Import.** A node written elsewhere, such as a Markdown export of another space, MAY be created
+keeping its `id`, `created_at`, `updated_at`, `created_by` and `updated_by`, so every copy of a
+note has the same id, dates and authors. It is created as above, with these values in `nodes`
+instead of the new ULID, `now` and the writer's provenance, and only when no node in `nodes` has
+that id (an id that only `history` has, such as a node deleted here, is created again as a
+recovered node is, 17.5). `updated_at` MUST NOT be earlier than `created_at`. The `history` row,
+and from schema version 3 the `node.create` change, are those of the import: made `now`, with the
+provenance of whoever imported it. So the node says who wrote it and when, and its history says
+who brought it into this space and when.
+
 **From schema version 3**, each of these writes also adds its row to `changes` first (17.1), and
 points its `history` rows at it; a delete also adds a `link_history` row for each of the node's
 links other than `mentions` (17.3).
@@ -702,6 +727,7 @@ Settings live in the `settings` table (5.1). Schema version 3 defines these keys
 | `space.id` | The `id` from `manifest.json` (5.1) | Never absent |
 | `space.icon` | The icon of the space: one emoji, such as `🌱` | No icon: readers show their default icon |
 | `capture.enabled` | `on` or `off`: whether conversations captured from agents are written to this space at all (15.5) | `on` |
+| `markdown.folder` | A folder, recorded as in 15.3, where the implementation keeps a `.md` file of every node, one way, from the space to the folder ([decision 0006](https://github.com/knodemd/handbook/blob/main/decisions/0006-markdown.md)). Files it did not write there are never changed or removed | No live Markdown folder |
 
 - The **name** of a space stays in `manifest.json` (section 2), so a list of spaces can be shown
   without opening each database. Renaming a space rewrites the manifest; it is not a setting.
