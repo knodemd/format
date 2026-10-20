@@ -440,7 +440,13 @@ A destination resolves to:
 3. when the destination has a `#`, the oldest node whose `title_key` equals the key of the
    part before the first `#` (titles may themselves contain `#`, so the whole destination is
    tried first);
-4. otherwise it does not resolve. It is stored in `unresolved_links` with the key of the part
+4. when the part before the first `#` has a `/`, it is a **path**, as Obsidian writes links
+   between notes of the same name: the oldest node whose `markdown.path` property (section 5)
+   is that path, or ends with `/` and that path. Both are compared by their **path key**: the
+   title key without a leading `./` or `/` and without a trailing `.md`, so `[[Projects/Plan]]`
+   and `[[projects/plan.md]]` both resolve to a node imported from `Work/Projects/Plan.md`.
+   Titles are tried first, so a node titled `Projects/Plan` still wins;
+5. otherwise it does not resolve. It is stored in `unresolved_links` with the key of the part
    before the first `#`, or of the whole destination when there is none.
 
 ### 7.3 When a title appears
@@ -449,6 +455,11 @@ When a node is created, or its title changes, every row of `unresolved_links` wh
 `target_key` is the node's title key becomes a `mentions` link from its `source_id` to the
 node, and the row is deleted. The link's `created_by` is the provenance of the change that made
 the title appear.
+
+In the same way, when a node's `markdown.path` is set, every row whose `target_key` is the path
+key of that path, or of any ending of it that still has a `/`, each with or without `.md`,
+becomes a `mentions` link to the node: setting `Work/Projects/Plan.md` resolves rows waiting for
+`work/projects/plan`, `projects/plan` and `projects/plan.md`.
 
 ### 7.4 Renaming
 
