@@ -10,7 +10,9 @@ A `.knode` file is one **space**: a local memory shared by a person and their AI
 each one and from where (**provenance**), structured metadata such as the agent and session of a
 conversation (**properties**), every earlier version and who made it (**history**), a full-text
 index to search them, and, from schema version 3, its settings, the folders that feed it, and
-what each agent may do in it (**grants**).
+what each agent may do in it (**grants**). From schema version 4 it also keeps kinds of link of
+its own, the layout of its graph and canvases (**views**), vectors for searching by meaning
+(**embeddings**), files (**attachments**), and the Loro documents that merge edits made at once.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
@@ -34,7 +36,11 @@ The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are to be read as in
 15. [Space settings and folders](#15-space-settings-and-folders)
 16. [Agents, keys and grants](#16-agents-keys-and-grants)
 17. [Change history and undo](#17-change-history-and-undo)
-18. [Appendix: the schema](#appendix-the-schema)
+18. [Typed links and views](#18-typed-links-and-views)
+19. [Semantic search](#19-semantic-search)
+20. [Attachments](#20-attachments)
+21. [Concurrent editing with Loro](#21-concurrent-editing-with-loro)
+22. [Appendix: the schema](#appendix-the-schema)
 
 ## 1. The package
 
@@ -45,8 +51,8 @@ so the Finder shows it as one file.
 Example.knode/
   manifest.json   format version, id and name of the space
   knode.db        SQLite database: nodes, links, provenance, history, search
-  blobs/          attachments, by hash (reserved, see section 14)
-  sync/           Loro updates for sync (reserved, see section 14)
+  blobs/          attachments, by hash (section 20)
+  sync/           Loro documents of node bodies (section 21)
 ```
 
 - A writer MUST create all four entries when it creates a space.
@@ -122,10 +128,11 @@ PRAGMA foreign_keys = ON;    -- deleting a node removes its links and tags
 and SHOULD use `PRAGMA synchronous = NORMAL` and a busy timeout of a few seconds.
 
 **Schema version.** SQLite's `PRAGMA user_version` holds the schema version of the database:
-`3` for the schema in this document. See section 13.
+`4` for the schema in this document. See section 13.
 
-**Text** is UTF-8. **Booleans** are not used. All tables except the full-text index are
-`STRICT`.
+**Text** is UTF-8. **Booleans** are not used. All tables except the virtual tables (the
+full-text index, and from schema version 4 the vector tables of 19.4 and the tables sqlite-vec
+makes for them) are `STRICT`.
 
 ## 5. Tables
 
@@ -146,9 +153,21 @@ and SHOULD use `PRAGMA synchronous = NORMAL` and a busy timeout of a few seconds
 | `grants` | What each agent may do in the space: nothing, read or write (schema version 3, 16.5) |
 | `changes` | One row per change, with who made it; what undo works on (schema version 3, 17.1) |
 | `link_history` | Every link made or removed by hand (schema version 3, 17.3) |
+| `link_kinds` | The kinds of link the space defines (schema version 4, 18.1) |
+| `views` | Graph views and canvases (schema version 4, 18.3) |
+| `positions` | Where each node is in a view (schema version 4, 18.4) |
+| `view_groups` | Groups of nodes on a canvas (schema version 4, 18.5) |
+| `embedding_models` | The embedding models whose vectors the space holds (schema version 4, 19.2) |
+| `embedding_chunks` | The chunks of each node that were embedded (schema version 4, 19.4) |
+| `embedding_vectors_<n>` | The vectors of model *n*, a sqlite-vec table made only where sqlite-vec is loaded (schema version 4, 19.4) |
+| `blobs` | The files in `blobs/` (schema version 4, 20.2) |
+| `attachments` | Which node uses which file, under which name (schema version 4, 20.3) |
+| `loro_docs` | The version of each Loro document that a body holds (schema version 4, 21.3) |
+| `loro_peers` | Who each Loro peer is (schema version 4, 21.3) |
 
 The full SQL is in the [appendix](#appendix-the-schema). A writer MUST create exactly that schema
-for the schema version it writes. A reader MUST NOT depend on the order of columns; it reads them by name.
+for the schema version it writes; the vector tables of schema version 4 are added later, as 19.4
+says. A reader MUST NOT depend on the order of columns; it reads them by name.
 
 ### 5.1 settings
 
@@ -164,6 +183,7 @@ Defined keys:
 | `space.id` | The `id` from `manifest.json`. Written when the space is created; never changes |
 | `space.icon` | The icon of the space (schema version 3, 15.1) |
 | `capture.enabled` | Whether captured conversations are written to the space (schema version 3, 15.1) |
+| `embedding.model` | The embedding model searches by meaning use (schema version 4, 19.2) |
 
 Keys a reader does not know MUST be kept. Later versions add settings here (section 14).
 
@@ -214,6 +234,7 @@ characters. This version defines:
 | `decision` | A decision and the reasons for it |
 | `idea` | An idea, not yet worked out |
 | `source` | Something read: a web page, a document, a book |
+| `canvas` | A canvas: its title names it and its body says what it is for (schema version 4, 18.3) |
 
 A reader MUST keep and show kinds it does not know.
 
@@ -252,9 +273,12 @@ direction. Indexed by `(target_id, kind)` for backlinks. Deleting either node de
 | `related` | The nodes are related. The default for links made by hand |
 | `part-of` | The source is part of the target, such as a note of a project |
 | `derived-from` | The source was made from the target, such as a decision from a conversation |
+| `answers` | The source answers a question the target asks (schema version 4) |
+| `contradicts` | The source says the opposite of the target (schema version 4) |
 
 A writer MUST NOT create or delete `mentions` links except by reading a body. Every other kind is
-made and removed by hand, and is never touched when a body changes.
+made and removed by hand, and is never touched when a body changes. From schema version 4 a space
+also defines kinds of its own, and every kind has labels for showing it (18.1).
 
 ### 5.6 unresolved_links
 
@@ -361,6 +385,9 @@ format: HTML is ignored by plain-text extraction, and a bare URL is plain text.
 - The destination is everything between `[[` and the first `|` (or `]]`), trimmed. The
   label is the rest. An empty destination is not a link.
 - `[[links]]` inside code spans and code blocks are text, not links.
+- From schema version 4, `[[name]]` and `![[name]]` whose destination is the name of one of the
+  node's attachments point at that file, and `knode:blob/<hash>` URLs name a file by its hash
+  (20.4).
 - `[[` and `]]` follow the rules of the reference parser,
   [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) 0.13 with its wiki-links
   option. An implementation in another language MUST match the
@@ -377,7 +404,8 @@ Whenever a node's body is written (created or changed), in the same transaction:
 
 1. Read every `[[link]]` of the body (section 6).
 2. Resolve each one (7.2). The set of resolved targets is the node's new set of `mentions`
-   links.
+   links. From schema version 4, a destination that is the name of one of the node's attachments
+   resolves to it first, and makes neither a link nor an unresolved link (20.4).
 3. Delete the node's `mentions` links whose target is not in the set; insert the new ones.
    Links that stay keep their `created_at` and `created_by`.
 4. Replace the node's rows in `unresolved_links` with the links that did not resolve.
@@ -493,6 +521,9 @@ joined to `nodes` afterwards. Querying `nodes_fts` alone lets FTS5 sort by rank 
 `snippet()` only on the rows returned, which keeps a search of 10,000 nodes under 10 ms.
 Snippets mark matches with `**` (Markdown bold) and cuts with `…`.
 
+From schema version 4, search by meaning and hybrid search, which ranks words and meaning
+together, are in section 19.
+
 ## 10. Provenance
 
 Every write records who made it and from where:
@@ -569,6 +600,12 @@ title rewrite the nodes that link here (7.4) and resolve links waiting for it (7
 points its `history` rows at it; a delete also adds a `link_history` row for each of the node's
 links other than `mentions` (17.3).
 
+**From schema version 4**, attachments written with a node are added before its links are read
+(20.3), so `![[name]]` resolves to them; a writer that uses Loro writes the body through the
+node's Loro document (21.4); and the triggers of migration 4 drop the node's embedding chunks
+when its text changes (19.4) and mark its Loro document as behind when a body is written without
+Loro (21.5).
+
 ## 13. Versions and migrations
 
 Two numbers describe a space:
@@ -577,18 +614,19 @@ Two numbers describe a space:
   specification. It changes only when a reader of the old version could not safely read the
   new one. This document is format `0`.
 - **The schema version**, `PRAGMA user_version` of `knode.db`: how many migrations have run.
-  This document describes schema version `3`.
+  This document describes schema version `4`.
 
 **Migrations** are numbered from 1. Migration *n* takes the database from schema version *n − 1*
 to *n*. Version 0 is an empty database; migration 1 creates the tables of version 1, migration 2
-adds `properties`, and migration 3 adds settings, folders, agents, grants and changes. All are in
-the appendix.
+adds `properties`, migration 3 adds settings, folders, agents, grants and changes, and migration 4
+adds link kinds, views, embeddings, attachments and Loro documents. All are in the appendix.
 
 | Migration | Schema version | What it does |
 |---|---|---|
 | 1 | 1 | Creates `settings`, `provenance`, `nodes`, `tags`, `links`, `unresolved_links`, `history` and `nodes_fts` |
 | 2 | 2 | Adds `properties` (5.9) |
 | 3 | 3 | Adds `folders` (15), `agents`, `agent_keys` and `grants` (16), `changes` and `link_history`, and `change_id` and `restored_from` to `history` (17). Makes every existing version a change of its own |
+| 4 | 4 | Adds `link_kinds`, `views`, `positions` and `view_groups` (18), `embedding_models` and `embedding_chunks` (19), `blobs` and `attachments` (20), `loro_docs` and `loro_peers` (21), and the triggers `embedding_chunks_stale` and `loro_docs_body`. Changes no data |
 
 **Moving to schema version 3.** Migration 3 only adds, as the rules below require:
 
@@ -603,6 +641,19 @@ the appendix.
   already set up and to give them the access they had, rather than give it silently.
 - Readers of schema version 2 or older refuse a space at version 3 (step 2 below), so no older
   writer can write to it without adding changes.
+
+**Moving to schema version 4.** Migration 4 only adds tables and triggers, and changes no row:
+
+- It creates only ordinary tables, so it runs with or without sqlite-vec. The vector tables are
+  created later, by the writer that embeds (19.4).
+- A space at version 4 with no rows in the new tables behaves as at version 3: no kinds of link
+  beyond the built-in ones, no views (a graph is laid out from nothing), no embeddings (search by
+  words only), no attachments, and no Loro documents (every body is written whole). Each is filled
+  when it is first used; nothing needs converting.
+- `answers`, `contradicts` and `canvas` become built in; spaces of earlier versions have no links
+  or nodes of these kinds unless a writer made them, and those keep their meaning.
+- Readers of schema version 3 or older refuse a space at version 4, so no older writer can leave
+  embedding chunks or Loro documents out of step without the triggers.
 
 When a space is opened:
 
@@ -630,11 +681,12 @@ they are.
 
 | What | Where | Planned |
 |---|---|---|
-| Attachments by hash | `blobs/` | v0.3 |
-| Sync as Loro updates | `sync/` | v0.4 |
-| Embeddings for semantic search (sqlite-vec) | new tables in `knode.db` | v0.3 |
-| Saved positions on the map and canvas | new tables | v0.3 |
+| Sync between devices: exchanging Loro updates, and the state of each device | `sync/`, beside `sync/nodes/` (21.2) | v0.4 |
 | Encryption metadata | `manifest.json` and settings | v0.4 |
+| Compaction of old versions | `history` (17.7) | later |
+
+Attachments (section 20), embeddings (section 19), saved positions (section 18) and the Loro
+documents of node bodies (section 21) were reserved here until schema version 4.
 
 ## 15. Space settings and folders
 
@@ -869,6 +921,10 @@ Whatever its level, an agent MUST NOT be able to create a space, change settings
 folders (15.2), add agents, issue or revoke keys, change grants, or purge history (17.7). These
 are for people only.
 
+From schema version 4, `read` also allows reading link kinds, views, positions and attachments,
+and searching by meaning; `write` also allows defining link kinds, changing views and positions,
+and attaching and removing files. Purging blobs (20.5) is for people only.
+
 ### 16.7 Provenance of agents
 
 A change made by an agent is recorded with `actor_kind = agent` and, as `actor`, the `name` of
@@ -936,6 +992,10 @@ Indexed by `(subject, id)`, `undoes` and `changed_at`. Actions use the naming ru
 | `folder.set`, `folder.remove` | The folder | 15.2 |
 | `agent.add`, `agent.key.add`, `agent.key.revoke`, `grant.set` | 16.8 | 16.8 |
 | `migrate` | `''` | A migration rewrites data (section 13), with provenance `system`/`knode` |
+| `link_kind.set`, `link_kind.remove` | The kind | 18.1 (schema version 4) |
+| `view.set`, `view.remove` | The view | 18.3 (schema version 4) |
+| `attachment.add`, `attachment.remove` | The node | 20.3 (schema version 4) |
+| `blobs.purge` | `''` | 20.5 (schema version 4) |
 
 A reader MUST keep and show actions it does not know. Setting or removing properties alone adds
 no change (5.9): properties carry their own provenance, like links did before this version.
@@ -1007,8 +1067,9 @@ Rules:
 - **Once.** A change that has an undo (a change whose `undoes` is its id) that has not itself
   been undone MUST NOT be undone again. Undoing the undo redoes the change.
 - **What can be undone:** changes with actions `node.create`, `node.update`, `node.delete`,
-  `node.restore`, `link.create`, `link.delete`, `undo` and `import`. Any other change MUST NOT
-  be undone through undo; settings, folders, agents, keys and grants are simply changed again.
+  `node.restore`, `link.create`, `link.delete`, `undo` and `import`, and, from schema version 4,
+  `attachment.add` and `attachment.remove` (20.3). Any other change MUST NOT be undone through
+  undo; settings, folders, agents, keys, grants, link kinds and views are simply changed again.
 - **Nothing is removed.** Undo never deletes or changes rows of `changes`, `history` or
   `link_history`.
 
@@ -1059,13 +1120,612 @@ undoes change 42 and was made by Ada.
   `history`, and the rows of `link_history` where it is the source or the target, and adds a
   change with action `node.purge` and the node as `subject`, holding no content. The `changes`
   rows of earlier changes stay: they hold no content. A purged node cannot be restored, and an
-  undo that would need its versions MUST be refused.
+  undo that would need its versions MUST be refused. From schema version 4, purging a node also
+  deletes its attachments and the blobs no one else uses (20.5), its positions, the view of a
+  canvas node with its positions and groups, and its folder in `sync/` (21.6); its embedding
+  chunks and `loro_docs` row go with the node.
 - **No compaction in this version.** Later versions may define how old versions are compacted;
   until then a space keeps every version of every node.
 
+## 18. Typed links and views
+
+Added in schema version 4. Links say how two nodes relate, people and agents can name kinds of
+link of their own, and the graph and the canvases keep where everything was put.
+
+### 18.1 Link kinds
+
+Every link has a kind (5.5). A kind is either **built in**, defined by this document, or
+**defined by the space**, a row of `link_kinds`. The built-in kinds, and how a reader shows them:
+
+| Kind | Direction | Read from the source | Read from the target |
+|---|---|---|---|
+| `mentions` | directed | mentions | mentioned in |
+| `related` | symmetric | related to | related to |
+| `part-of` | directed | part of | has part |
+| `derived-from` | directed | derived from | source of |
+| `answers` | directed | answers | answered by |
+| `contradicts` | directed | contradicts | contradicted by |
+
+`answers` (the source answers a question the target asks) and `contradicts` (the source says
+the opposite of the target) are built in from schema version 4; a reader of an older schema shows
+them by name, as any kind it does not know.
+
+**link_kinds** holds the kinds a space defines:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `kind` | TEXT, primary key | The name, as stored in `links.kind` |
+| `label` | TEXT | How the link reads from its source: Ideas for v2 *depends on* SQLite for local data. 1 to 64 characters |
+| `inverse_label` | TEXT, `''` for none | How it reads from its target: SQLite for local data is *needed by* Ideas for v2. At most 64 characters |
+| `direction` | TEXT | `directed` or `symmetric`. Default `directed` |
+| `description` | TEXT, `''` for none | What the kind means, for people and agents choosing one |
+| `created_at`, `created_by` | INTEGER | When and by whom it was defined |
+| `updated_at`, `updated_by` | INTEGER | When and by whom it last changed |
+
+Rules:
+
+- **Names** follow the naming rule of node kinds (5.3): lower-case ASCII letters, digits and
+  `-`, starting with a letter, at most 32 characters. Labels are text with no line breaks.
+- **Built-in kinds are not rows.** A writer MUST NOT add a row for a built-in kind. If a later
+  version makes built in a kind that a space already defines, the kind takes the built-in meaning
+  and the row is kept for its labels.
+- **Only known kinds are written.** From schema version 4, a writer MUST NOT create a link whose
+  kind is neither built in nor in `link_kinds`. A reader MUST keep links of kinds it does not
+  know, and shows them by their name.
+- **Symmetric kinds** read the same from both nodes, with `label`; `inverse_label` is ignored.
+  Asked to link B to A with a symmetric kind when A is already linked to B with it, a writer
+  SHOULD treat the link as already there.
+- **Changing a kind.** Labels and the description may change at any time. `direction` MUST NOT
+  change, and the row MUST NOT be removed, while a row of `links` has the kind. `link_history`
+  may keep a removed kind; it is then shown by name.
+- Defining, changing and removing a kind are changes (17.1) with actions `link_kind.set` and
+  `link_kind.remove`, the kind as `subject`, and the new row's `label`, `inverse_label`,
+  `direction` and `description` as `detail`. They are not undone through undo (17.4); the kind is
+  simply changed again. People, and agents with `write` (16.6), may make them.
+
+### 18.2 Backlinks
+
+The **backlinks** of a node are the links whose `target_id` is the node, of every kind, including
+`mentions`. They are not stored anywhere else: `links` is the only store, and its index
+`links_target` on `(target_id, kind)` makes them as fast to read as the links going out, which use
+the primary key. For example:
+
+```sql
+SELECT l.kind, n.id, n.title
+FROM links l JOIN nodes n ON n.id = l.source_id
+WHERE l.target_id = ?1
+ORDER BY l.kind, n.title_key;
+```
+
+- A reader shows the links going out with each kind's label, and the backlinks with its inverse
+  label; for a symmetric kind, both with its label, and a node linked both ways once.
+- A link from a node to itself is shown once, as a link going out.
+- `unresolved_links` are not backlinks: their target does not exist yet.
+
+### 18.3 Views
+
+A **view** is a named arrangement of nodes on a plane. This version defines two kinds:
+
+- **`graph`**: the space, or the part of it a filter keeps, as nodes and the links between them.
+  The reader lays it out; positions record where nodes were put, so the map looks the same when
+  it is opened again, on any machine. A node without a position is placed by the reader.
+- **`canvas`**: a board arranged by hand. It holds only the nodes that have a position on it, in
+  groups or not, and shows the links between them. Each canvas is also a **node** of kind
+  `canvas` (5.3), so it has a title (the canvas's name), a Markdown body (what the canvas is
+  for), tags, links and history, and is searched and linked like any other node. Its view row
+  points at it with `node_id`. Linking two nodes on a canvas is making a link by hand (5.5).
+
+**views**:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | TEXT, primary key | The view's id, a ULID |
+| `kind` | TEXT | `graph` or `canvas`. Follows the naming rule of node kinds |
+| `name` | TEXT, `''` for none | The name of a `graph` view, 1 to 128 characters. `''` for a `canvas`, whose name is its node's title |
+| `node_id` | TEXT, or NULL | For a `canvas`, its node. NULL for a `graph`. Unique: a node is at most one canvas |
+| `settings` | TEXT | A JSON object (below). Default `{}` |
+| `created_at`, `created_by` | INTEGER | When and by whom it was made |
+| `updated_at`, `updated_by` | INTEGER | When and by whom its name or settings last changed |
+
+`settings` keys, all optional; a reader MUST keep keys it does not know:
+
+| Key | Value | Kinds |
+|---|---|---|
+| `viewport` | `{"x": 0, "y": 0, "zoom": 1}`: the point of the plane at the centre of the screen, and the zoom (1 is one point per point) | both |
+| `filter` | An object; a node is shown only when it passes every key present: `node_kinds`, an array that must hold the node's kind; `tags`, an array that must hold one of its tags; `actors`, an array that must hold the `actor` of its `created_by` or `updated_by` provenance; `since` and `until`, RFC 3339 times that its `updated_at` must be at or after, and before. `link_kinds`, an array, shows only links of those kinds | `graph` |
+
+Rules:
+
+- A reader MUST keep views of kinds it does not know, and MUST NOT show them.
+- **Creating a canvas** creates its node (a `node.create` change) and its view row in the same
+  write. **Deleting a canvas** is deleting its node: the view row, its positions and its groups
+  are kept, so undoing the delete or restoring the node (17.4, 17.5) brings the canvas back as it
+  was. A reader does not show a canvas whose node does not exist.
+- Creating a `graph` view, renaming it or changing its `filter` is a change with action
+  `view.set`, the view's id as `subject` and its `name` and `filter` as `detail`; removing it is `view.remove`, which deletes its row,
+  its positions and its groups. They are not undone through undo. A canvas view is not removed on
+  its own; its node is deleted instead.
+- Moving the viewport, positions (18.4) and groups (18.5) add no change: like properties (5.9),
+  they carry their own provenance, and a drag would otherwise fill the history.
+- Reading views, positions and groups needs `read` (16.6); changing them needs `write`.
+
+### 18.4 positions
+
+Where each node is in a view.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `view_id` | TEXT | The view, deleted with it |
+| `node_id` | TEXT | The node. Not a foreign key: a position outlives a deleted node, so restoring it puts it back |
+| `x`, `y` | REAL | The centre of the node, in points of the view's plane: `x` grows to the right, `y` grows down |
+| `width`, `height` | REAL, or NULL | The size of the node's box in points, both greater than 0, or both NULL for the reader's default size |
+| `z` | INTEGER | Stacking order on a canvas: a higher `z` is drawn in front. Default 0; ignored by a graph |
+| `display` | TEXT | `open`: the node is shown with its content (on a canvas, its body); `collapsed`: only its title. Default `open` |
+| `group_id` | TEXT, or NULL | The group it is in (18.5), on a canvas |
+| `updated_at`, `updated_by` | INTEGER | When and by whom it was last placed |
+
+Primary key `(view_id, node_id)`: a node is at most once in a view. Indexed by `node_id`.
+
+- A position whose node does not exist is kept and not shown.
+- Removing a node from a canvas deletes its position; the node is not deleted.
+- Moving many nodes at once is one write, so the view is never seen half moved.
+
+### 18.5 view_groups
+
+A **group** is a labelled box on a canvas that holds nodes: they move with it, and when it is
+collapsed only its label is shown.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | TEXT, primary key | The group's id, a ULID |
+| `view_id` | TEXT | The canvas view, deleted with it |
+| `label` | TEXT, `''` for none | The group's label |
+| `x`, `y` | REAL | The centre of the box, as for positions |
+| `width`, `height` | REAL | The size of the box, greater than 0 |
+| `display` | TEXT | `open` or `collapsed` (only the label is shown, and the nodes in it are hidden). Default `open` |
+| `updated_at`, `updated_by` | INTEGER | When and by whom it was last changed |
+
+Deleting a group leaves its nodes on the canvas, outside any group (`group_id` becomes NULL).
+Groups do not nest in this version. A reader ignores groups of a view that is not a `canvas`.
+
+## 19. Semantic search
+
+Added in schema version 4. An **embedding model** turns a piece of text into a vector of numbers
+so that texts with close meanings have close vectors. A space keeps the vectors of its nodes, cut
+into **chunks**, in [sqlite-vec](https://github.com/asg017/sqlite-vec) tables, so a search finds
+nodes by meaning as well as by words, on the device.
+
+### 19.1 What a reader can count on
+
+- **Embeddings are optional.** A reader MUST open a space whether or not it has embeddings, and
+  whether or not the reader can load sqlite-vec. Without them, search is by words (section 9).
+- **They are derived data**, like `nodes_fts`: everything in them is computed from `nodes`, and an
+  implementation MAY delete them all and compute them again. Sync (v0.4) does not carry them, and
+  an export leaves them out.
+- **The model is never in the package.** Not its weights, its tokenizer or any of its files: a
+  package records only which model made the vectors (19.2). Models are large, and packages are
+  synced and shared. An implementation gets the model elsewhere, such as bundled with the app.
+- Reading vectors and searching by meaning need `read` (16.6), like any search.
+
+### 19.2 embedding_models
+
+The models whose vectors the space holds. Two models are the same only when every column but
+`id` and `created_at` is equal; any difference is a different model, whose vectors MUST NOT be
+compared with the other's.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | INTEGER, primary key | Row id; names the model's vector table (19.4) |
+| `name` | TEXT | The model's name where it is published, such as `BAAI/bge-small-en-v1.5` |
+| `revision` | TEXT, `''` for none | The version of its weights: a release, or the hash of a commit |
+| `dimensions` | INTEGER | The length of its vectors, 1 to 8192 |
+| `chunking` | TEXT | The chunking rules its chunks follow. This version defines `knode-1` (19.3) |
+| `query_prefix` | TEXT, `''` for none | Text put before a query when it is embedded, as some models require, such as `query: ` |
+| `document_prefix` | TEXT, `''` for none | Text put before a chunk when it is embedded, such as `passage: ` |
+| `created_at` | INTEGER | When it was added, ms UTC |
+
+**The model in use** is the setting `embedding.model` (5.1): the `id` of a row, in decimal, such
+as `1`. Searching by meaning uses only that model. When the setting is absent the space has no
+semantic search.
+
+**Changing the model.** An implementation whose model differs from the one in use (another name,
+revision, dimension, chunking or prefix) adds a row for it, creates its vector table and embeds
+every node with it. Until every node is embedded with the new model it MAY keep searching with
+the old one; then it sets `embedding.model` to the new row, deletes the old model's chunks, drops
+its vector table and deletes its row, in one transaction. A model is never mixed with another:
+the vectors of the old model are not reused.
+
+### 19.3 Chunking: `knode-1`
+
+A node is embedded in **chunks**, so a long node is found by the part that matches. A chunk is a
+range of the node's `plain` text (section 8), counted in Unicode scalar values (characters) from
+0, end excluded. Every chunk is embedded with the node's title, so a short chunk keeps its
+context.
+
+1. **Blocks and sections.** The blocks of the body are the lines of `plain` (section 8). A
+   **section** starts at the beginning of `plain` and at each heading block, and runs to the next
+   heading. Its **heading path** is the text of its heading and of the headings that enclose it
+   (the nearest heading before it of a smaller level, then the nearest before that one of a smaller
+   level still, and so on), from the outermost, joined with ` > `, such as `Plan > Q4`; `''`
+   before the first heading.
+2. **Packing.** Sections are taken in order. A chunk takes whole sections while its length,
+   counting the `\n` between them, stays at most **1,000** characters; the next section starts a
+   new chunk.
+3. **Long sections.** A section longer than 1,000 characters is cut on its own: its blocks are
+   packed the same way, whole blocks while the piece stays at most 1,000 characters; a block
+   longer than that is cut after the last whitespace at or before its 1,000th character from the
+   start of the piece, or at the 1,000th character when there is none.
+4. **Overlap.** Each piece of a long section after its first also takes the end of the piece
+   before it. Let *p* be 150 characters before the piece's start. The piece starts instead at the
+   character after the first whitespace at or after *p*, if that is before its start, or at *p*
+   when there is none. The overlap does not count towards the 1,000.
+5. **Ranges** never start or end with the `\n` between blocks: a chunk starts at the first
+   character of its first block (or inside a block, for a cut or an overlap) and ends after the
+   last character of its last block.
+6. A chunk's **heading** is the heading path of its first section.
+7. **Empty text.** A node whose `plain` is empty has one chunk, the range 0 to 0, so its title is
+   still embedded.
+8. **What is embedded** is the model's `document_prefix`, then the node's title, the chunk's
+   heading and the chunk's text, each on its own line, leaving out a heading that is `''`. If
+   this is longer than the model accepts, the model's own truncation applies.
+
+The chunks of a node are numbered from 0 in order (`ord`).
+
+### 19.4 embedding_chunks and the vector tables
+
+**embedding_chunks**, one row per chunk of each model:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | INTEGER, primary key, autoincrement | The chunk's id; the rowid of its vector. Never used again once deleted |
+| `node_id` | TEXT | The node, deleted with it |
+| `model_id` | INTEGER | The model that embedded it |
+| `ord` | INTEGER | Its number in the node, from 0 |
+| `text_start`, `text_end` | INTEGER | Its range of `plain` (19.3) |
+| `heading` | TEXT | Its heading path |
+| `embedded_at` | INTEGER | When it was embedded, ms UTC |
+
+`(node_id, model_id, ord)` is unique; indexed by `(model_id, node_id)`.
+
+**The vector table** of a model is a sqlite-vec `vec0` virtual table named
+`embedding_vectors_` followed by the model's `id`, with one row per chunk of that model, whose
+rowid is the chunk's `id`. For model 1 with 384 dimensions it is created as:
+
+```sql
+CREATE VIRTUAL TABLE embedding_vectors_1 USING vec0 (
+    embedding float[384] distance_metric=cosine
+);
+```
+
+- **When it is created.** Never by a migration: it needs sqlite-vec, and its dimension is the
+  model's. It is created by the writer that adds the model's row (19.2), in the same transaction,
+  and only by a writer that has sqlite-vec loaded. It is dropped with the model's row. sqlite-vec
+  also creates its own tables, whose names start with the vector table's name; they belong to it.
+- **Vectors** are 32-bit floats, as the model gives them; the distance is cosine distance (1
+  minus the cosine similarity, from 0 to 2), so their length does not matter.
+- **sqlite-vec** is loaded as an extension (version 0.1 or a later version that reads its tables).
+  If an implementation cannot read a vector table, it drops it and the model's chunks and embeds
+  again: they are derived data.
+
+**Keeping them in step.**
+
+- The trigger `embedding_chunks_stale` deletes a node's chunks, of every model, when its title or
+  `plain` changes, and deleting a node deletes them by foreign key. Both work without sqlite-vec,
+  so every writer keeps chunks right, whether or not it embeds.
+- Their vectors are not deleted then: no trigger can touch a `vec0` table where sqlite-vec is not
+  loaded. A vector whose chunk is gone is an **orphan**. Orphans are harmless, because every search
+  joins vectors to `embedding_chunks` and chunk ids are never used again; a writer with sqlite-vec
+  SHOULD delete them from time to time:
+  `DELETE FROM embedding_vectors_1 WHERE rowid NOT IN (SELECT id FROM embedding_chunks WHERE model_id = 1)`.
+- **A node waits for embedding** when it has no chunk of the model:
+  `SELECT id FROM nodes WHERE id NOT IN (SELECT node_id FROM embedding_chunks WHERE model_id = ?1)`.
+  An implementation embeds those nodes when it chooses, such as in the background.
+- **Embedding a node** is slow, so it is done outside a transaction; then, in one transaction, the
+  writer checks that the node's title and `plain` are still the ones it embedded (else it starts
+  again), deletes the node's chunks of the model and their vectors, and inserts the new chunks and
+  their vectors.
+
+### 19.5 Searching by meaning (recommended)
+
+The query is embedded as the model's `query_prefix` followed by the text people typed. The 100
+nearest chunks are found in the model's vector table, joined to their chunks, and each node is
+ranked by its nearest chunk:
+
+```sql
+WITH hits AS (
+    SELECT rowid, distance FROM embedding_vectors_1
+    WHERE embedding MATCH ?1 AND k = 100
+)
+SELECT c.node_id, min(hits.distance) AS distance
+FROM hits JOIN embedding_chunks c ON c.id = hits.rowid AND c.model_id = 1
+GROUP BY c.node_id
+ORDER BY distance, c.node_id
+LIMIT 50;
+```
+
+### 19.6 Hybrid search (recommended)
+
+Hybrid search ranks words and meaning together with **reciprocal rank fusion** (RRF), which needs
+only the order of each list, not its scores: BM25 scores and cosine distances are not on the same
+scale. For a query and a number of results *L* (20 by default):
+
+1. **Words.** The nodes of a full-text search (section 9), at most 50, in its order. A node's
+   word rank *w* is its place in this list, from 1.
+2. **Meaning.** The nodes of a search by meaning (19.5), at most 50, in its order. A node's
+   meaning rank *m* is its place in this list, from 1.
+3. **Score.** Each node in either list scores `1 / (60 + w) + 1 / (60 + m)`, leaving out the
+   term of a list it is not in.
+4. **Order.** Nodes are sorted by score, highest first; equal scores by the better of their two
+   ranks, then by node id. The first *L* are the results.
+
+- **Modes.** `words` uses step 1 alone, `meaning` step 2 alone, and `hybrid` both. When the
+  space has no model in use, or sqlite-vec cannot be loaded, `hybrid` is `words`, and the
+  implementation SHOULD say so to whoever searched.
+- A node that is not embedded yet is found by its words only.
+- **Snippets** come from the full-text search when the node is in its list; otherwise from the
+  node's nearest chunk, its text cut to about 16 words around the start.
+- **Several spaces** searched at once are each ranked this way, and the results merged by score.
+- The constants 60 (from [Cormack, Clarke and Büttcher, 2009](https://doi.org/10.1145/1571941.1572114)),
+  50 and 100 are part of the recommendation, so implementations rank the same; an implementation
+  MAY expose them as settings for experiments.
+
+For example, with *L* = 3, a words list (A, B, C) and a meaning list (C, A, D) give A
+1/61 + 1/62 = 0.03252, C 1/63 + 1/61 = 0.03227, B 1/62 = 0.01613 and D 1/63 = 0.01587: the
+results are A, C and B. A node found both ways comes before one found only one way.
+
+## 20. Attachments
+
+Added in schema version 4. Images, PDFs and other files live inside the space, in `blobs/`,
+named by the hash of their content, and are linked from the nodes that use them.
+
+### 20.1 Files in blobs/
+
+- **Hash.** A file is named by the SHA-256 of its bytes, written as 64 lower-case hexadecimal
+  digits: its **hash**.
+- **Layout.** The file is `blobs/` followed by the first two digits of the hash, a `/`, and the
+  other 62, with no extension:
+
+  ```text
+  blobs/
+    9f/
+      86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+  ```
+
+- **Immutable and shared.** A blob file never changes. Two attachments with the same content
+  are one file: adding a file that is already there writes nothing.
+- **Writing.** A writer writes the bytes to a temporary file in `blobs/` (a name starting with
+  `.`), computes the hash while it writes, flushes it to disk, and renames it to its place (or
+  deletes it if the place is taken). Only then does it add the rows of 20.2 and 20.3, so a row
+  never names a missing file. A crash can leave a file with no row; it is removed by a purge
+  (20.5).
+- **Reading.** A reader MAY check a file's hash when it reads it, and MUST NOT use a file whose
+  hash differs from its name. A blob whose file is missing (for example, not synced yet) is shown
+  as missing, not as an error.
+- Readers MUST ignore files in `blobs/` that do not follow this layout.
+
+### 20.2 blobs
+
+| Column | Type | Meaning |
+|---|---|---|
+| `hash` | TEXT, primary key | The hash (20.1) |
+| `size` | INTEGER | The size of the file in bytes |
+| `media_type` | TEXT | Its [media type](https://www.iana.org/assignments/media-types/), such as `image/png` or `application/pdf`, lower case, without parameters. Default `application/octet-stream` |
+| `created_at`, `created_by` | INTEGER | When and by whom it was first added |
+
+The media type is found from the content when it can be, else from the name's extension.
+
+### 20.3 attachments
+
+Which node uses which blob, under which name.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `node_id` | TEXT | The node. Not a foreign key: an attachment outlives a deleted node, so restoring the node brings it back |
+| `name` | TEXT | Its name in the node: the original name of the file, such as `beds.svg` |
+| `hash` | TEXT | The blob |
+| `created_at`, `created_by` | INTEGER | When and by whom it was attached |
+
+Primary key `(node_id, name)`: names are unique in a node, exactly as written (compared
+case-sensitively). Indexed by `hash`.
+
+**Names** are trimmed, not empty, at most 255 characters, and MUST NOT contain `/`, `\`, `[`, `]`,
+`|`, `#` or control characters, which file systems or `[[links]]` use. A writer that attaches a
+file whose name is taken in the node adds ` 2`, ` 3`, and so on before the extension:
+`beds 2.svg`.
+
+- **Attaching** a file adds its blob (if new) and an `attachments` row. Done as part of creating
+  or updating a node (pasting an image while writing), it belongs to that change. Done on its own,
+  it is a change with action `attachment.add`, the node as `subject` and `{"name": ..., "hash": ...}`
+  as `detail`.
+- **Removing** an attachment deletes its row, never the blob: a change with action
+  `attachment.remove` and the same `subject` and `detail`.
+- **Undo** (17.4) of `attachment.add` removes the row if it is still there with the same hash;
+  of `attachment.remove`, adds it back if the name is free and the blob's file exists. Undoing a
+  node change that also attached a file leaves the attachment: an attachment no body uses is
+  harmless.
+- Reading attachments needs `read` (16.6); attaching and removing need `write`.
+
+### 20.4 In Markdown
+
+A body uses an attachment in two ways:
+
+| Written | Means |
+|---|---|
+| `![[beds.svg]]` | The attachment of this node named `beds.svg`, shown in place (an image, a PDF, or a box with the file's name) |
+| `[[beds.svg]]` | A link to that attachment, opened when clicked |
+| `![Beds](knode:blob/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08)` | The blob with that hash, shown in place, in standard Markdown |
+| `[the plan](knode:blob/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08)` | A link to the blob with that hash |
+
+- **Resolving `[[...]]`.** Before the steps of 7.2, a destination (the whole destination, with
+  no `#` split) that is exactly the name of one of the node's attachments resolves to that
+  attachment. It makes no link and no `unresolved_links` row. So `![[Diagram]]` embeds the node
+  titled Diagram, unless the node has an attachment named `Diagram`.
+- When an attachment is added, the node's `unresolved_links` rows whose `target` is exactly its
+  name are deleted; when one is removed and the body still uses its name, a row is added back, as
+  7.1 would.
+- **`knode:blob/<hash>`** is a URL that names a blob by its hash, in any Markdown link or image.
+  It works without an `attachments` row, so a node can show a blob attached elsewhere; a writer
+  that adds such a reference to a blob the node does not have SHOULD attach it too.
+- **Plain text** (section 8) keeps the name in `![[beds.svg]]` and the description of
+  `![Beds](knode:blob/...)`, as for any link and image.
+- **Writers SHOULD write `![[name]]`** for a file attached to the node: it reads well in any
+  Markdown editor. Exporting a space to Markdown files writes each attachment as a file next to
+  the node's file, under its name, and turns `knode:blob/<hash>` into the path of that file.
+- **Safety.** Attachments come from anywhere. A reader MUST NOT run scripts in them: SVG and
+  HTML are shown as images or as text, never as active pages.
+
+### 20.5 Purging blobs
+
+A blob file is **never deleted by itself**: not when an attachment is removed, nor when a node is
+deleted, so undo and restore can always bring them back. Blobs are removed only by an explicit
+**purge**, asked for by a person, never an agent (16.6):
+
+- **Purging unused blobs** removes, files and rows, every blob that no `attachments` row (of any
+  node, deleted ones included) names and no `knode:blob/<hash>` in any `nodes.body` or
+  `history.body` names, and every file in `blobs/` that has no row and no such reference. It is a
+  change with action `blobs.purge`, subject `''` and `{"hashes": [...]}` as `detail`.
+- **Purging a node** (17.7) deletes its `attachments` rows and then removes the blobs that are no
+  longer used, as above, in the same change: whatever was purged must not stay in the package.
+
+A purge deletes the rows in one transaction and the files after it commits, so a failed purge
+leaves files with no row, never rows with no file.
+
+## 21. Concurrent editing with Loro
+
+Added in schema version 4. When a person and agents edit the same node at once, their edits to
+its body merge with [Loro](https://loro.dev), a CRDT, instead of one overwriting the other. The
+SQLite tables stay the readable source of truth; Loro documents in `sync/` are how edits merge.
+
+### 21.1 What is a Loro document
+
+- **Only the body.** Each node may have one Loro document, which holds its Markdown body. Titles,
+  kinds, tags, properties and links are short values, written whole as before: the last write
+  wins, and history keeps the others.
+- The document has one root container, a `LoroText` named `body`, whose text is exactly
+  `nodes.body`. Other root names are reserved; readers ignore them and writers keep them.
+- **Documents are made when needed**: when a writer that uses Loro first edits a node's body
+  through Loro. A node without a document is simply its body. The first document of a node
+  starts from its current body, inserted by a peer whose provenance is `system`/`knode`
+  (21.3), so the text written before co-editing has no other author.
+
+### 21.2 Layout of sync/
+
+```text
+sync/
+  nodes/
+    01M5B73W76PSMH5FH4R0T2KGN7/
+      snapshot.loro
+      updates/
+        01M5D1QX7W3E9Y2A6K0B8C4F5H.loro
+        01M5D1R2N0V5T8M3G7J1P9X6QD.loro
+```
+
+- One folder per node, named by its id, holding:
+  - `snapshot.loro`: the whole document, as Loro exports a snapshot (`ExportMode::Snapshot`);
+    absent until the first compaction;
+  - `updates/`: one file per write, the edits it made, as Loro exports updates
+    (`ExportMode::Updates` from the version before the write). Each is named by a new ULID and
+    `.loro`.
+- **The document** is the snapshot, if any, with every update file imported. Loro updates can be
+  imported in any order and more than once with the same result, so the files' order and
+  duplicates do not matter.
+- Files are written to a temporary name starting with `.` and renamed into place; a file never
+  changes after that. Readers MUST ignore names they do not know in `sync/`. The rest of `sync/`
+  is reserved for sync between devices (section 14).
+
+### 21.3 loro_docs and loro_peers
+
+**loro_docs** records, for each node whose body is in step with its document, the version of the
+document that `nodes.body` holds:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `node_id` | TEXT, primary key | The node, deleted with it |
+| `version` | TEXT | The document's version vector when `nodes.body` was written: a JSON object from each peer id, in decimal, to the number of its operations included, such as `{"7318201936571142": 52}` |
+| `updated_at` | INTEGER | When, ms UTC |
+
+**loro_peers** says who each Loro peer is, so authorship survives merging:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `peer` | TEXT, primary key | A Loro peer id: an unsigned 64-bit integer, in decimal |
+| `provenance` | INTEGER | The provenance (section 10) of the edits made as that peer |
+| `created_at` | INTEGER | When the peer was first used, ms UTC |
+
+A writer uses a new random peer id for each provenance it edits for in each run of the program,
+and records it before writing an update made as it. A peer id is never used by two programs at
+once, as Loro requires.
+
+### 21.4 Writing a body with Loro
+
+A writer that uses Loro writes every new body of a node that has a document (an edit, an undo, a
+restore, a body rewritten by a rename) as an edit of the document: Loro's text update from the
+old text to the new one, made as the peer of the change's provenance, never by replacing the
+document. Then:
+
+1. It writes the update file (21.2) and flushes it to disk.
+2. It writes the node as in section 12, in one transaction: `body`, `plain`, links, history and
+   the change, with the change's provenance. In the same transaction, after the body is written,
+   it sets the node's `loro_docs` row to the document's new version.
+
+When people and agents edit at once, each write is merged into the document first and written to
+the database as its own change, so history (section 11) and undo (17.4) keep every version and
+who made it. A writer MAY gather a run of edits by the same provenance, such as typing, into one
+write, but writes `nodes.body` before the edits are shown to anyone else, and when the run ends.
+
+**Without Loro.** A writer that does not use Loro writes bodies as before. The trigger
+`loro_docs_body` then deletes the node's `loro_docs` row, which marks the document as behind
+`nodes.body`.
+
+### 21.5 Keeping SQLite and the documents in step
+
+`nodes.body` is the source of truth; a document only helps merging. Before a writer that uses Loro
+edits a node that has a document, it loads the document and compares its version with the
+node's `loro_docs` row:
+
+- **The row is missing** (the body was written without Loro), **or the document lacks
+  operations the row includes** (an update file was lost): it makes the document
+  equal to `nodes.body` with a text update made as the peer of the node's `updated_by`
+  provenance, writes the update file, and adds the `loro_docs` row. Nothing is written to `nodes`.
+- **The document is ahead of the row** (it has every operation the row includes, and more, from an
+  update file written by a write that did not commit, or, from v0.4, from another device): it
+  writes the document's text to the node as an update (section 12), with the provenance of the
+  peers that made those operations if they are all one, otherwise `system`/`knode`, and sets the
+  row to the document's version.
+- **Otherwise** the document and the body are in step.
+
+**A reader that does not use Loro** reads `nodes.body` and nothing in `sync/`, and MUST NOT
+change or delete anything there. Search, links, history and every other table work the same,
+because every merged edit is written to SQLite.
+
+### 21.6 Compaction
+
+A node's `updates/` folder grows with every write. When it holds more than 100 files, or more
+bytes than its `snapshot.loro`, a writer that uses Loro SHOULD compact it:
+
+1. Load the document from the snapshot and the update files, remembering which files it read.
+2. Export a new full snapshot, write it to a temporary file and rename it over `snapshot.loro`.
+3. Delete the update files it read, and only those: others may have been written meanwhile.
+
+A crash between steps 2 and 3 leaves updates that the snapshot already has; importing them again
+changes nothing. Compaction MUST write a full snapshot (`ExportMode::Snapshot`), never a shallow
+one, which drops the history that merging with another device's edits needs.
+
+**Deleted and purged nodes.** When a node is deleted its folder is kept, so an undo or a restore
+finds it (and 21.5 brings it in step with the restored body). Purging a node (17.7) deletes its
+folder: a document holds every version of the text.
+
+### 21.7 Loro versions
+
+The files in `sync/` use the binary encoding of Loro 1.x, which Loro keeps compatible from 1.0: a
+writer MUST write files that Loro 1.0 and later 1.x versions can import, and a reader that uses
+Loro MUST be able to import files written by any Loro 1.x. The reference implementation uses
+Loro 1.16. If a later Loro changes its encoding, a new schema version will say how existing files
+are rewritten, in a migration.
+
 ## Appendix: the schema
 
-Schema version 3: migrations 1, 2 and 3, in order, exactly as written here.
+Schema version 4: migrations 1, 2, 3 and 4, in order, exactly as written here.
 
 Migration 1:
 
@@ -1272,4 +1932,145 @@ INSERT INTO changes (id, changed_at, changed_by, action, subject)
 SELECT seq, changed_at, changed_by, 'node.' || op, node_id FROM history ORDER BY seq;
 
 UPDATE history SET change_id = seq;
+```
+
+Migration 4:
+
+```sql
+-- Typed links and views (section 18).
+CREATE TABLE link_kinds (
+    kind          TEXT PRIMARY KEY NOT NULL CHECK (length(kind) BETWEEN 1 AND 32),
+    label         TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 64),
+    inverse_label TEXT NOT NULL DEFAULT '' CHECK (length(inverse_label) <= 64),
+    direction     TEXT NOT NULL DEFAULT 'directed' CHECK (direction IN ('directed', 'symmetric')),
+    description   TEXT NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    created_by    INTEGER NOT NULL REFERENCES provenance (id),
+    updated_at    INTEGER NOT NULL,
+    updated_by    INTEGER NOT NULL REFERENCES provenance (id)
+) STRICT;
+
+CREATE TABLE views (
+    id         TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 26),
+    kind       TEXT NOT NULL,
+    name       TEXT NOT NULL DEFAULT '',
+    node_id    TEXT CHECK (node_id IS NULL OR length(node_id) = 26),
+    settings   TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES provenance (id),
+    updated_at INTEGER NOT NULL,
+    updated_by INTEGER NOT NULL REFERENCES provenance (id)
+) STRICT;
+
+CREATE UNIQUE INDEX views_node ON views (node_id) WHERE node_id IS NOT NULL;
+
+CREATE TABLE view_groups (
+    id         TEXT PRIMARY KEY NOT NULL CHECK (length(id) = 26),
+    view_id    TEXT NOT NULL REFERENCES views (id) ON DELETE CASCADE,
+    label      TEXT NOT NULL DEFAULT '',
+    x          REAL NOT NULL,
+    y          REAL NOT NULL,
+    width      REAL NOT NULL CHECK (width > 0),
+    height     REAL NOT NULL CHECK (height > 0),
+    display    TEXT NOT NULL DEFAULT 'open' CHECK (display IN ('open', 'collapsed')),
+    updated_at INTEGER NOT NULL,
+    updated_by INTEGER NOT NULL REFERENCES provenance (id)
+) STRICT;
+
+CREATE INDEX view_groups_view ON view_groups (view_id);
+
+CREATE TABLE positions (
+    view_id    TEXT NOT NULL REFERENCES views (id) ON DELETE CASCADE,
+    node_id    TEXT NOT NULL CHECK (length(node_id) = 26),
+    x          REAL NOT NULL,
+    y          REAL NOT NULL,
+    width      REAL CHECK (width IS NULL OR width > 0),
+    height     REAL CHECK (height IS NULL OR height > 0),
+    z          INTEGER NOT NULL DEFAULT 0,
+    display    TEXT NOT NULL DEFAULT 'open' CHECK (display IN ('open', 'collapsed')),
+    group_id   TEXT REFERENCES view_groups (id) ON DELETE SET NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by INTEGER NOT NULL REFERENCES provenance (id),
+    PRIMARY KEY (view_id, node_id),
+    CHECK ((width IS NULL) = (height IS NULL))
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX positions_node ON positions (node_id);
+CREATE INDEX positions_group ON positions (group_id) WHERE group_id IS NOT NULL;
+
+-- Embeddings for semantic search (section 19). The vector tables themselves
+-- (embedding_vectors_<model id>, sqlite-vec) are created by the writer that
+-- embeds, never by this migration (19.4).
+CREATE TABLE embedding_models (
+    id              INTEGER PRIMARY KEY,
+    name            TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 200),
+    revision        TEXT NOT NULL DEFAULT '',
+    dimensions      INTEGER NOT NULL CHECK (dimensions BETWEEN 1 AND 8192),
+    chunking        TEXT NOT NULL,
+    query_prefix    TEXT NOT NULL DEFAULT '',
+    document_prefix TEXT NOT NULL DEFAULT '',
+    created_at      INTEGER NOT NULL,
+    UNIQUE (name, revision, dimensions, chunking, query_prefix, document_prefix)
+) STRICT;
+
+CREATE TABLE embedding_chunks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id     TEXT NOT NULL REFERENCES nodes (id) ON DELETE CASCADE,
+    model_id    INTEGER NOT NULL REFERENCES embedding_models (id),
+    ord         INTEGER NOT NULL CHECK (ord >= 0),
+    text_start  INTEGER NOT NULL CHECK (text_start >= 0),
+    text_end    INTEGER NOT NULL CHECK (text_end >= text_start),
+    heading     TEXT NOT NULL DEFAULT '',
+    embedded_at INTEGER NOT NULL,
+    UNIQUE (node_id, model_id, ord)
+) STRICT;
+
+CREATE INDEX embedding_chunks_model ON embedding_chunks (model_id, node_id);
+
+-- A node whose title or text changes loses its chunks, so it is embedded again.
+CREATE TRIGGER embedding_chunks_stale AFTER UPDATE OF title, plain ON nodes
+WHEN old.title IS NOT new.title OR old.plain IS NOT new.plain BEGIN
+    DELETE FROM embedding_chunks WHERE node_id = new.id;
+END;
+
+-- Attachments (section 20). The files are in blobs/, named by their hash.
+CREATE TABLE blobs (
+    hash       TEXT PRIMARY KEY NOT NULL
+               CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),
+    size       INTEGER NOT NULL CHECK (size >= 0),
+    media_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+    created_at INTEGER NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES provenance (id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE attachments (
+    node_id    TEXT NOT NULL CHECK (length(node_id) = 26),
+    name       TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 255),
+    hash       TEXT NOT NULL REFERENCES blobs (hash),
+    created_at INTEGER NOT NULL,
+    created_by INTEGER NOT NULL REFERENCES provenance (id),
+    PRIMARY KEY (node_id, name)
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX attachments_hash ON attachments (hash);
+
+-- Concurrent editing with Loro (section 21). The documents are in sync/.
+CREATE TABLE loro_docs (
+    node_id    TEXT PRIMARY KEY NOT NULL REFERENCES nodes (id) ON DELETE CASCADE,
+    version    TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+
+-- A body written without Loro marks the node's document as behind (21.4).
+CREATE TRIGGER loro_docs_body AFTER UPDATE OF body ON nodes
+WHEN old.body IS NOT new.body BEGIN
+    DELETE FROM loro_docs WHERE node_id = new.id;
+END;
+
+CREATE TABLE loro_peers (
+    peer       TEXT PRIMARY KEY NOT NULL
+               CHECK (length(peer) BETWEEN 1 AND 20 AND peer NOT GLOB '*[^0-9]*'),
+    provenance INTEGER NOT NULL REFERENCES provenance (id),
+    created_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
 ```

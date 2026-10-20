@@ -1,0 +1,2 @@
+# Blobs are named by the SHA-256 of their bytes: never convert line endings
+**/*.knode/blobs/** binary
