@@ -235,6 +235,7 @@ characters. This version defines:
 | `idea` | An idea, not yet worked out |
 | `source` | Something read: a web page, a document, a book |
 | `canvas` | A canvas: its title names it and its body says what it is for (schema version 4, 18.3) |
+| `project` | A project, an area or anything else other nodes belong to. They link to it with `part-of` (section 7); a project inside another links to it with `part-of` too. A reader that lists projects shows each with the projects it is part of |
 
 A reader MUST keep and show kinds it does not know.
 
