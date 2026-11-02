@@ -2,6 +2,42 @@
 
 Example `.knode` spaces, small and readable, for testing implementations.
 
+## Focused examples
+
+These additional spaces use schema version 4 and synthetic data only. Copy them before
+opening them with an implementation that upgrades their schema.
+
+| Space | What it demonstrates |
+|---|---|
+| [`Permissions.knode`](Permissions.knode) | A project folder with capture off, a read-only agent, a write agent, a dummy key fingerprint, and two versions of a release plan with provenance |
+| [`Map.knode`](Map.knode) | A custom `depends-on` link, a canvas with saved positions, an SVG attachment and three indexed nodes with four-dimensional unit vectors |
+| [`Editing.knode`](Editing.knode) | One note edited by Ada and Codex from the same earlier version; the merged text, three history entries, Loro peers, a snapshot and an update file in `sync/nodes/` |
+
+The key fingerprint in Permissions is deliberately all zeroes: there is no usable key and no
+machine credential store is changed. Its `~/Projects/example` folder is illustrative metadata;
+the generator never reads that folder. Map's vectors are made-up basis vectors, **not** the
+output of a language model and not a search-quality benchmark. No model is downloaded.
+
+Editing demonstrates the **local concurrent-editing format** in specification section 21. Its
+final body is `Release v0.3 together.`; the updates do not imply that device sync or a Cloud
+transport is implemented.
+
+Reproduce all three with the reference implementation, choosing an output directory that does
+not exist:
+
+```sh
+cd knode/core
+cargo run -p knode-sync --example format_examples -- /tmp/knode-examples-new
+cargo test -p knode-sync --example format_examples
+```
+
+The generator refuses existing output, reopens each space and checks the expected data. Its
+test also checks preservation of existing output and runs in the core CI. IDs and timestamps
+are allocated when generating, so a new run is logically equivalent rather than byte-identical.
+Regeneration uses the core's current schema; the committed copies here use schema 4.
+SQLite integrity and foreign-key checks pass for the committed databases; all are checkpointed,
+with no WAL or shared-memory sidecars.
+
 ## Example.knode
 
 A space for a small side project, a garden planner, written by a person (Ada) and two agents
