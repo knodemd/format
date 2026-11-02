@@ -449,6 +449,15 @@ A destination resolves to:
 5. otherwise it does not resolve. It is stored in `unresolved_links` with the key of the part
    before the first `#`, or of the whole destination when there is none.
 
+When several nodes qualify in step 2, 3 or 4, as notes of the same name in different folders
+do, and the linking node has a `markdown.path`, the destination resolves to the **nearest** of
+them, as Obsidian does: the one whose `markdown.path` folder takes the fewest folders to go up
+and down from the linking node's folder (folders compared by title key; a node without a path is
+farthest). Ties, and a linking node without a path, keep the oldest. From
+`Basket/Season/Plan.md`, `[[Estado]]` resolves to `Basket/Estado.md` rather than an older
+`Alpha/Estado.md`, and `[[app/README]]` to `Basket/Season/app/README.md` rather than
+`Labs/app/README.md`.
+
 ### 7.3 When a title appears
 
 When a node is created, or its title changes, every row of `unresolved_links` whose
@@ -460,6 +469,12 @@ In the same way, when a node's `markdown.path` is set, every row whose `target_k
 key of that path, or of any ending of it that still has a `/`, each with or without `.md`,
 becomes a `mentions` link to the node: setting `Work/Projects/Plan.md` resolves rows waiting for
 `work/projects/plan`, `projects/plan` and `projects/plan.md`.
+
+Since which node is nearest depends on paths (7.2), setting a node's `markdown.path` also
+resolves its own body's links again (7.1), and those of every node with a `mentions` link to
+another node of the same title key, when this node is nearer to it than the node it points at.
+An import that writes a note before the note nearest to its links ends as if it had written them
+in the other order.
 
 ### 7.4 Renaming
 
