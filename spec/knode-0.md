@@ -465,8 +465,8 @@ do, and the linking node has a `markdown.path`, the destination resolves to the 
 them, as Obsidian does: the one whose `markdown.path` folder takes the fewest folders to go up
 and down from the linking node's folder (folders compared by title key; a node without a path is
 farthest). Ties, and a linking node without a path, keep the oldest. From
-`Basket/Season/Plan.md`, `[[Estado]]` resolves to `Basket/Estado.md` rather than an older
-`Alpha/Estado.md`, and `[[app/README]]` to `Basket/Season/app/README.md` rather than
+`Beta/Sprint/Plan.md`, `[[Status]]` resolves to `Beta/Status.md` rather than an older
+`Alpha/Status.md`, and `[[app/README]]` to `Beta/Sprint/app/README.md` rather than
 `Labs/app/README.md`.
 
 ### 7.3 When a title appears
