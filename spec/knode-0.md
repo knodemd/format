@@ -467,7 +467,7 @@ and down from the linking node's folder (folders compared by title key; a node w
 farthest). Ties, and a linking node without a path, keep the oldest. From
 `Beta/Sprint/Plan.md`, `[[Status]]` resolves to `Beta/Status.md` rather than an older
 `Alpha/Status.md`, and `[[app/README]]` to `Beta/Sprint/app/README.md` rather than
-`Labs/app/README.md`.
+`Other/app/README.md`.
 
 ### 7.3 When a title appears
 
