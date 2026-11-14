@@ -235,9 +235,16 @@ characters. This version defines:
 | `idea` | An idea, not yet worked out |
 | `source` | Something read: a web page, a document, a book |
 | `canvas` | A canvas: its title names it and its body says what it is for (schema version 4, 18.3) |
-| `project` | A project, an area or anything else other nodes belong to. They link to it with `part-of` (section 7); a project inside another links to it with `part-of` too. A reader that lists projects shows each with the projects it is part of |
+| `project` | A project, an area or anything else other nodes belong to. They link to it with `part-of` (section 7); a project inside another links to it with `part-of` too |
 
 A reader MUST keep and show kinds it does not know.
+
+`project` needs no schema version: it is a kind like any other, and a reader that does not know
+it keeps and shows project nodes as it does any kind it does not know. A reader that lists
+projects shows each under one parent: the project its oldest `part-of` link to a project points to
+(by `created_at`, then target id), so a tree of projects reads the same everywhere. A project
+folder (15.2) is where a project's files live; a writer that adds one MAY create, or link to, the
+`project` node of the same name as the folder.
 
 **Metadata is never in the body.** Dates, authors, sources, tags, properties (5.9) and
 permissions live in columns and tables. A body MUST NOT be given YAML frontmatter by a writer; frontmatter is only produced
@@ -773,7 +780,7 @@ folders of notes it imports, and folders where an agent keeps its sessions.
 
 | Kind | Meaning | `capture = off` means |
 |---|---|---|
-| `project` | A folder people and agents work in, such as a code repository. Conversations held in it, or in any folder inside it, are captured into this space (15.5) | Nothing from conversations held in it is stored, in this space or any other |
+| `project` | A folder people and agents work in, such as a code repository. Conversations held in it, or in any folder inside it, are captured into this space (15.5). The project it holds the files of is the `project` node of the same name (5.3) | Nothing from conversations held in it is stored, in this space or any other |
 | `notes` | A folder of Markdown files whose notes are imported into the space ([decision 0006](https://github.com/knodemd/handbook/blob/main/decisions/0006-markdown.md)) | The folder is not read |
 | `agent` | A folder where an agent keeps its sessions, read by capture in addition to the agent's usual folders. `rules.agent` names the agent | The folder is not read |
 
