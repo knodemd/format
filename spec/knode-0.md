@@ -128,7 +128,7 @@ PRAGMA foreign_keys = ON;    -- deleting a node removes its links and tags
 and SHOULD use `PRAGMA synchronous = NORMAL` and a busy timeout of a few seconds.
 
 **Schema version.** SQLite's `PRAGMA user_version` holds the schema version of the database:
-`4` for the schema in this document. See section 13.
+`5` for the schema in this document. See section 13.
 
 **Text** is UTF-8. **Booleans** are not used. All tables except the virtual tables (the
 full-text index, and from schema version 4 the vector tables of 19.4 and the tables sqlite-vec
@@ -145,7 +145,8 @@ makes for them) are `STRICT`.
 | `links` | Typed links between nodes, by id |
 | `unresolved_links` | `[[links]]` whose target does not exist yet |
 | `history` | Every version of every node, including deleted ones |
-| `nodes_fts` | The FTS5 full-text index of titles and plain text |
+| `nodes_fts` | The FTS5 full-text index of titles, plain text and imported Markdown paths |
+| `nodes_fts_content` | The external-content view joining nodes to `markdown.path` (schema version 5) |
 | `properties` | Structured metadata of each node, by key (schema version 2) |
 | `folders` | The folders that feed the space (schema version 3, 15.2) |
 | `agents` | The agents that may have access to the space (schema version 3, 16.3) |
@@ -324,9 +325,11 @@ Indexed by `(node_id, seq)` and, from schema version 3, `change_id`. See section
 
 ### 5.8 nodes_fts
 
-An FTS5 table indexing `nodes.title` and `nodes.plain`, stored as an external-content table
-over `nodes` (rowid `nodes.seq`), so the text is not stored twice. Triggers on `nodes` keep it
-in step. See section 9.
+An FTS5 table indexing `nodes.title`, `nodes.plain` and, from schema version 5, the
+`markdown.path` property. Its external content is the `nodes_fts_content` view (rowid
+`nodes.seq`), joining each node to its path or an empty string. Text and paths are not stored
+twice. Triggers on nodes and path properties keep it in step. See section 9.
+Schema versions 1–4 use `nodes` directly and index only title and plain text.
 
 ### 5.9 properties
 
@@ -457,6 +460,15 @@ A destination resolves to:
 5. otherwise it does not resolve. It is stored in `unresolved_links` with the key of the part
    before the first `#`, or of the whole destination when there is none.
 
+When several nodes qualify in step 2, 3 or 4, as notes of the same name in different folders
+do, and the linking node has a `markdown.path`, the destination resolves to the **nearest** of
+them, as Obsidian does: the one whose `markdown.path` folder takes the fewest folders to go up
+and down from the linking node's folder (folders compared by title key; a node without a path is
+farthest). Ties, and a linking node without a path, keep the oldest. From
+`Basket/Season/Plan.md`, `[[Estado]]` resolves to `Basket/Estado.md` rather than an older
+`Alpha/Estado.md`, and `[[app/README]]` to `Basket/Season/app/README.md` rather than
+`Labs/app/README.md`.
+
 ### 7.3 When a title appears
 
 When a node is created, or its title changes, every row of `unresolved_links` whose
@@ -468,6 +480,12 @@ In the same way, when a node's `markdown.path` is set, every row whose `target_k
 key of that path, or of any ending of it that still has a `/`, each with or without `.md`,
 becomes a `mentions` link to the node: setting `Work/Projects/Plan.md` resolves rows waiting for
 `work/projects/plan`, `projects/plan` and `projects/plan.md`.
+
+Since which node is nearest depends on paths (7.2), setting a node's `markdown.path` also
+resolves its own body's links again (7.1), and those of every node with a `mentions` link to
+another node of the same title key, when this node is nearer to it than the node it points at.
+An import that writes a note before the note nearest to its links ends as if it had written them
+in the other order.
 
 ### 7.4 Renaming
 
@@ -520,26 +538,31 @@ Code
 
 ## 9. Full-text search
 
-`nodes_fts` is created as:
+From schema version 5, `nodes_fts` is created as:
 
 ```sql
 CREATE VIRTUAL TABLE nodes_fts USING fts5 (
-    title, plain,
-    content = 'nodes', content_rowid = 'seq',
+    title, plain, markdown_path,
+    content = 'nodes_fts_content', content_rowid = 'seq',
     tokenize = 'unicode61 remove_diacritics 2',
     prefix = '2 3'
 );
-INSERT INTO nodes_fts (nodes_fts, rank) VALUES ('rank', 'bm25(5.0, 1.0)');
+INSERT INTO nodes_fts (nodes_fts, rank) VALUES ('rank', 'bm25(5.0, 1.0, 2.0)');
 ```
 
 - **Tokens** are Unicode words, compared without case or diacritics: `cafe` finds `Café`.
+  Path separators and dots delimit tokens: `DEPLOY.md` and `deploy` find a node imported from
+  `Projects/DEPLOY.md`. Query words may match across the three columns.
 - **Prefix indexes** of 2 and 3 characters make search-as-you-type fast.
-- **Ranking** is BM25, with a match in the title weighing five times one in the plain text. The
-  ranking is stored in the table (`rank` option), so `ORDER BY rank` uses it.
-- **Kept in step by triggers** `nodes_fts_insert`, `nodes_fts_delete` and `nodes_fts_update`
-  (after an update of `title` or `plain`), defined in the appendix. A writer MUST NOT write to
-  `nodes_fts` otherwise; `INSERT INTO nodes_fts (nodes_fts) VALUES ('rebuild')` rebuilds it
-  from `nodes` if ever needed.
+- **Ranking** is BM25: title weight 5, plain text weight 1, path weight 2. The ranking is stored
+  in the table (`rank` option), so `ORDER BY rank` uses it.
+- **Only the path property is indexed.** Other property values remain outside full-text search.
+- **Kept in step by triggers** on nodes and `markdown.path`, defined in migration 5 in the
+  appendix. Adding, changing or removing a path updates the index in the same transaction.
+  Deleting a node removes its entry before the foreign-key cascade removes its path.
+  A writer MUST NOT otherwise write to `nodes_fts`;
+  `INSERT INTO nodes_fts (nodes_fts) VALUES ('rebuild')` rebuilds it from `nodes_fts_content`.
+  Before schema version 5 it is rebuilt from `nodes` and uses weights 5 and 1.
 
 **Querying (recommended).** The reference library turns the words people type into an FTS5
 query where each word is quoted (so `AND`, `-` or `*` are words, not operators), every word is
@@ -658,12 +681,13 @@ Two numbers describe a space:
   specification. It changes only when a reader of the old version could not safely read the
   new one. This document is format `0`.
 - **The schema version**, `PRAGMA user_version` of `knode.db`: how many migrations have run.
-  This document describes schema version `4`.
+  This document describes schema version `5`.
 
 **Migrations** are numbered from 1. Migration *n* takes the database from schema version *n − 1*
 to *n*. Version 0 is an empty database; migration 1 creates the tables of version 1, migration 2
 adds `properties`, migration 3 adds settings, folders, agents, grants and changes, and migration 4
-adds link kinds, views, embeddings, attachments and Loro documents. All are in the appendix.
+adds link kinds, views, embeddings, attachments and Loro documents. Migration 5 extends the
+search index with imported Markdown paths. All are in the appendix.
 
 | Migration | Schema version | What it does |
 |---|---|---|
@@ -671,6 +695,7 @@ adds link kinds, views, embeddings, attachments and Loro documents. All are in t
 | 2 | 2 | Adds `properties` (5.9) |
 | 3 | 3 | Adds `folders` (15), `agents`, `agent_keys` and `grants` (16), `changes` and `link_history`, and `change_id` and `restored_from` to `history` (17). Makes every existing version a change of its own |
 | 4 | 4 | Adds `link_kinds`, `views`, `positions` and `view_groups` (18), `embedding_models` and `embedding_chunks` (19), `blobs` and `attachments` (20), `loro_docs` and `loro_peers` (21), and the triggers `embedding_chunks_stale` and `loro_docs_body`. Changes no data |
+| 5 | 5 | Rebuilds the derived full-text index with `markdown.path`, adds the `nodes_fts_content` view and path triggers. Changes no notes, metadata or history |
 
 **Moving to schema version 3.** Migration 3 only adds, as the rules below require:
 
@@ -699,6 +724,11 @@ adds link kinds, views, embeddings, attachments and Loro documents. All are in t
 - Readers of schema version 3 or older refuse a space at version 4, so no older writer can leave
   embedding chunks or Loro documents out of step without the triggers.
 
+**Moving to schema version 5.** Migration 5 replaces only derived search data. Notes,
+properties, provenance and history are unchanged; existing paths become searchable immediately.
+The rebuild and trigger changes run in the migration transaction, so a failure leaves the old
+index and schema version intact. Readers supporting at most schema 4 refuse the upgraded space.
+
 When a space is opened:
 
 1. If `format` is not supported, refuse to open it.
@@ -712,7 +742,8 @@ When a space is opened:
 Rules for later versions:
 
 - Within format 0, a new schema version only adds: tables, columns with defaults, indexes,
-  settings keys, node and link kinds. Data written by an older writer stays valid.
+  settings keys, node and link kinds. Derived indexes may be rebuilt without recording a data
+  change; original notes, metadata and history MUST be preserved. Older data stays valid.
 - A migration that must change existing data records it as provenance `system`/`knode`.
 - Each new schema version is described in this document's next revision, with its migration as
   SQL, before an implementation ships it.
@@ -1770,7 +1801,7 @@ are rewritten, in a migration.
 
 ## Appendix: the schema
 
-Schema version 4: migrations 1, 2, 3 and 4, in order, exactly as written here.
+Schema version 5: migrations 1, 2, 3, 4 and 5, in order, exactly as written here.
 
 Migration 1:
 
@@ -2118,4 +2149,82 @@ CREATE TABLE loro_peers (
     provenance INTEGER NOT NULL REFERENCES provenance (id),
     created_at INTEGER NOT NULL
 ) STRICT, WITHOUT ROWID;
+```
+
+Migration 5:
+
+```sql
+-- knode.db schema version 5, format 0: search imported Markdown paths.
+-- Only derived search data changes; nodes, properties and history stay as they were.
+DROP TRIGGER nodes_fts_insert;
+DROP TRIGGER nodes_fts_delete;
+DROP TRIGGER nodes_fts_update;
+DROP TABLE nodes_fts;
+
+CREATE VIEW nodes_fts_content AS
+SELECT n.seq, n.id, n.title, n.plain, coalesce(p.value, '') AS markdown_path
+FROM nodes n LEFT JOIN properties p ON p.node_id = n.id AND p.key = 'markdown.path';
+
+CREATE VIRTUAL TABLE nodes_fts USING fts5 (
+    title, plain, markdown_path,
+    content = 'nodes_fts_content', content_rowid = 'seq',
+    tokenize = 'unicode61 remove_diacritics 2',
+    prefix = '2 3'
+);
+INSERT INTO nodes_fts (nodes_fts, rank) VALUES ('rank', 'bm25(5.0, 1.0, 2.0)');
+INSERT INTO nodes_fts (nodes_fts) VALUES ('rebuild');
+
+CREATE TRIGGER nodes_fts_insert AFTER INSERT ON nodes BEGIN
+    INSERT INTO nodes_fts (rowid, title, plain, markdown_path)
+    SELECT seq, title, plain, markdown_path FROM nodes_fts_content WHERE id = new.id;
+END;
+
+-- Delete before the foreign-key cascade removes the path property.
+CREATE TRIGGER nodes_fts_delete BEFORE DELETE ON nodes BEGIN
+    INSERT INTO nodes_fts (nodes_fts, rowid, title, plain, markdown_path)
+    SELECT 'delete', seq, title, plain, markdown_path FROM nodes_fts_content WHERE id = old.id;
+END;
+
+CREATE TRIGGER nodes_fts_update AFTER UPDATE OF title, plain ON nodes BEGIN
+    INSERT INTO nodes_fts (nodes_fts, rowid, title, plain, markdown_path)
+    SELECT 'delete', old.seq, old.title, old.plain, markdown_path
+    FROM nodes_fts_content WHERE id = new.id;
+    INSERT INTO nodes_fts (rowid, title, plain, markdown_path)
+    SELECT seq, title, plain, markdown_path FROM nodes_fts_content WHERE id = new.id;
+END;
+
+-- An AFTER INSERT trigger avoids deleting twice during INSERT ... ON CONFLICT UPDATE.
+CREATE TRIGGER properties_fts_insert AFTER INSERT ON properties
+WHEN new.key = 'markdown.path' BEGIN
+    INSERT INTO nodes_fts (nodes_fts, rowid, title, plain, markdown_path)
+    SELECT 'delete', seq, title, plain, '' FROM nodes_fts_content WHERE id = new.node_id;
+    INSERT INTO nodes_fts (rowid, title, plain, markdown_path)
+    SELECT seq, title, plain, markdown_path FROM nodes_fts_content WHERE id = new.node_id;
+END;
+
+CREATE TRIGGER properties_fts_before_delete BEFORE DELETE ON properties
+WHEN old.key = 'markdown.path' BEGIN
+    INSERT INTO nodes_fts (nodes_fts, rowid, title, plain, markdown_path)
+    SELECT 'delete', seq, title, plain, markdown_path FROM nodes_fts_content WHERE id = old.node_id;
+END;
+
+CREATE TRIGGER properties_fts_delete AFTER DELETE ON properties
+WHEN old.key = 'markdown.path' BEGIN
+    INSERT INTO nodes_fts (rowid, title, plain, markdown_path)
+    SELECT seq, title, plain, markdown_path FROM nodes_fts_content WHERE id = old.node_id;
+END;
+
+CREATE TRIGGER properties_fts_before_update BEFORE UPDATE OF node_id, key, value ON properties
+WHEN old.key = 'markdown.path' OR new.key = 'markdown.path' BEGIN
+    INSERT INTO nodes_fts (nodes_fts, rowid, title, plain, markdown_path)
+    SELECT 'delete', seq, title, plain, markdown_path FROM nodes_fts_content
+    WHERE id IN (old.node_id, new.node_id);
+END;
+
+CREATE TRIGGER properties_fts_update AFTER UPDATE OF node_id, key, value ON properties
+WHEN old.key = 'markdown.path' OR new.key = 'markdown.path' BEGIN
+    INSERT INTO nodes_fts (rowid, title, plain, markdown_path)
+    SELECT seq, title, plain, markdown_path FROM nodes_fts_content
+    WHERE id IN (old.node_id, new.node_id);
+END;
 ```
