@@ -244,8 +244,8 @@ A reader MUST keep and show kinds it does not know.
 it keeps and shows project nodes as it does any kind it does not know. A reader that lists
 projects shows each under one parent: the project its oldest `part-of` link to a project points to
 (by `created_at`, then target id), so a tree of projects reads the same everywhere. A project
-folder (15.2) is where a project's files live; a writer that adds one MAY create, or link to, the
-`project` node of the same name as the folder.
+folder (15.2) is where a project's files live; a writer that adds one MAY create, or link to, a
+`project` node named after the folder, and then records it in the folder's `project` rule (15.4).
 
 **Metadata is never in the body.** Dates, authors, sources, tags, properties (5.9) and
 permissions live in columns and tables. A body MUST NOT be given YAML frontmatter by a writer; frontmatter is only produced
@@ -811,7 +811,7 @@ folders of notes it imports, and folders where an agent keeps its sessions.
 
 | Kind | Meaning | `capture = off` means |
 |---|---|---|
-| `project` | A folder people and agents work in, such as a code repository. Conversations held in it, or in any folder inside it, are captured into this space (15.5). The project it holds the files of is the `project` node of the same name (5.3) | Nothing from conversations held in it is stored, in this space or any other |
+| `project` | A folder people and agents work in, such as a code repository. Conversations held in it, or in any folder inside it, are captured into this space (15.5). The project it holds the files of is the `project` node its `project` rule names (15.4), or, without that rule, the `project` node of the same name (5.3) | Nothing from conversations held in it is stored, in this space or any other |
 | `notes` | A folder of Markdown files whose notes are imported into the space ([decision 0006](https://github.com/knodemd/handbook/blob/main/decisions/0006-markdown.md)) | The folder is not read |
 | `agent` | A folder where an agent keeps its sessions, read by capture in addition to the agent's usual folders. `rules.agent` names the agent | The folder is not read |
 
@@ -856,6 +856,14 @@ version defines:
 | `include` | Array of glob patterns | `notes` | `["**/*.md"]`: every Markdown file |
 | `exclude` | Array of glob patterns | `project`, `notes` | `[]`. For `notes`, matching files and folders are not read. For `project`, a conversation held in a matching folder is treated as if the project's `capture` were `off` |
 | `agent` | An agent name, as in provenance (`claude-code`, `codex`) | `agent` | Required: a folder of kind `agent` without it is skipped |
+| `project` | The id of the `project` node (5.3) the folder holds the files of | `project` | The folder holds the `project` node of the same name as its last part, the oldest by `created_at`, then id. A folder whose rule names a node that is gone, or is not a project, holds none |
+
+`project` is written by the writer that adds the folder, not chosen by the person, and a writer
+that changes a folder keeps it. Two different folders of the same name can then hold different
+projects, such as `api` and `api (b)`, and a project keeps its folder when it is renamed. A writer
+that starts recording it MAY first record the project each folder without the rule holds, as a
+`system` change (17.1), so a project added later does not change it. The rule needs no schema
+version: readers that do not know it keep it (above) and find the project by name, as before.
 
 Patterns are matched against the path relative to the folder, with `/` separators: `*` matches
 any characters except `/`, `**` matches any number of folders (including none), and `?` matches
