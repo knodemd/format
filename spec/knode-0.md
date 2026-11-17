@@ -371,6 +371,12 @@ A conversation captured from an agent session is identified by `conversation.age
 `conversation.session` together: a writer that captures the same session again updates that
 node instead of creating another one.
 
+A `project` node (5.3) that a project folder (15.2) holds may have this key (15.4):
+
+| Key | Value |
+|---|---|
+| `project.folder` | The project folder, as recorded (15.3), that last held the files of the project. A project without it was made without a folder, such as by an import |
+
 Knode's Markdown import and export (folders of `.md` files, such as an Obsidian vault) keep these
 keys, under `markdown.`, for what a file has that the node does not:
 
@@ -864,6 +870,12 @@ projects, such as `api` and `api (b)`, and a project keeps its folder when it is
 that starts recording it MAY first record the project each folder without the rule holds, as a
 `system` change (17.1), so a project added later does not change it. The rule needs no schema
 version: readers that do not know it keep it (above) and find the project by name, as before.
+
+A writer that records `project` SHOULD also set the project's `project.folder` property (5.9) to
+the folder's recorded path. When no folder holds a project any more, a writer adding a folder
+SHOULD give that project only to the folder `project.folder` names, and give any other folder a
+project of its own, so a folder removed and added again finds its project and its notes. A project
+without `project.folder` MAY go to the first folder of its name.
 
 Patterns are matched against the path relative to the folder, with `/` separators: `*` matches
 any characters except `/`, `**` matches any number of folders (including none), and `?` matches
