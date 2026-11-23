@@ -1092,6 +1092,7 @@ Indexed by `(subject, id)`, `undoes` and `changed_at`. Actions use the naming ru
 | `view.set`, `view.remove` | The view | 18.3 (schema version 4) |
 | `attachment.add`, `attachment.remove` | The node | 20.3 (schema version 4) |
 | `blobs.purge` | `''` | 20.5 (schema version 4) |
+| `project.move` | The project | A project and what is part of it move to or from another space (17.8) |
 
 A reader MUST keep and show actions it does not know. Setting or removing properties alone adds
 no change (5.9): properties carry their own provenance, like links did before this version.
@@ -1167,7 +1168,9 @@ Rules:
   `attachment.add` and `attachment.remove` (20.3). Any other change MUST NOT be undone through
   undo; settings, folders, agents, keys, grants, link kinds and views are simply changed again.
 - **Nothing is removed.** Undo never deletes or changes rows of `changes`, `history` or
-  `link_history`.
+  `link_history`, except when a move is undone in the space the project went to (17.8).
+- **Moves.** A `project.move` change, and an `undo` of one, MUST NOT be undone as above, in one
+  space: a move is undone in both its spaces at once (17.8).
 
 ### 17.5 Restoring a version
 
@@ -1222,6 +1225,85 @@ undoes change 42 and was made by Ada.
   chunks and `loro_docs` row go with the node.
 - **No compaction in this version.** Later versions may define how old versions are compacted;
   until then a space keeps every version of every node.
+
+### 17.8 Moving a project to another space
+
+A person, never an agent, MAY move a project (5.3) to another space, such as the team space it is
+shared in from now on. What moves is the project, every `project` node with a `part-of` link to a
+moved project, at any depth, and every other node with a `part-of` link to a moved project, except
+canvases, whose views belong to their space. The move writes the space it goes to (the
+**target**) first and then the space it leaves (the **source**), each in one transaction with one
+`project.move` change, whose `subject` is the project and whose `detail` is:
+
+```json
+{
+  "from": { "id": "01K8…", "name": "Personal" },
+  "to": { "id": "01K9…", "name": "Acme team" },
+  "change": 41,
+  "nodes": ["01M5…", "01M6…"],
+  "folders": ["01M7…"],
+  "crossing": [{ "from": "01M5…", "from_title": "Acme", "kind": "part-of",
+                 "to": "01M2…", "to_title": "Clients", "from_moves": true }]
+}
+```
+
+`from` and `to` name both spaces by their manifest; `change`, only in the source, is the target's
+`project.move` change; `nodes` lists the moved nodes; `folders` the moved folders; `crossing` the
+links between a moved node and one that stays.
+
+**In the target**, every moved node keeps its id and gets:
+
+- its row of `nodes` (kind, title, body, plain text, `created_at`, `updated_at`, `created_by`,
+  `updated_by`), its tags, properties, `unresolved_links` rows and attachments, with their blobs
+  (files first, 20.1), its folder in `sync/` and its `loro_docs` row, and the `loro_peers` rows of
+  the peers its version names (21.3);
+- **every row of its `history`**, in order, with the same `op`, `changed_at`, `changed_by`,
+  kind, title, body and tags. Their `change_id` is the move, and `restored_from` the new `seq` of
+  the row it named. This is the one exception to 17.2: a moved row's `changed_at` and
+  `changed_by` are those of the version, not of its change, so the history keeps who wrote each
+  version and when. Changes of the source are not copied: their numbers mean nothing in another
+  space, and a version is put back with a restore (17.5);
+- the rows of `link_history` whose two nodes both move, also as part of the move.
+
+Provenance rows are matched by their four values (5.2) and added where missing. The links among
+moved nodes are copied with their `created_at` and `created_by`, and link kinds they use that the
+target does not define are copied too. Links waiting for a moved node's title or path resolve
+(7.3). Folders of kind `project` whose project (15.4) moves are copied with the same id and a
+`project` rule naming it, so capture routes their conversations to the target (15.5).
+
+**Links do not cross spaces.** A link between a moved node and a node that stays is not copied.
+A `mentions` link from a moved node becomes an `unresolved_links` row for the staying node's title:
+the author's text stays as written, and links again when the target has a node of that title.
+Every other kind is removed, and listed in `crossing`.
+
+**In the source**, every moved node is deleted as in 7.5, as part of the move: its `history` gets a
+`delete` row and its links other than `mentions` get `delete` rows in `link_history`, so the
+source keeps everything needed to put it back. Its attachments and its folder in `sync/` stay, as
+for any deleted node. The moved folders are removed.
+
+**Before moving**, a writer MUST refuse when the target has a node with the id of a node that
+moves, or the history of one whose last row is not the `delete` of a `project.move`. In that one
+case the node is coming back to a space it was moved from: its old rows of `history`,
+`link_history` and `attachments` there are replaced by the ones it brings, which include them.
+A node deleted in the source by a `project.move` MUST NOT be restored there (17.5): it lives on in
+the target.
+
+**Undoing a move** is one `undo` change in each space, with `undoes` set to that space's
+`project.move` change, and is refused when either change has an undo in effect. It is refused
+when a later change of either space touched a moved node (it would be lost): moving the project
+back carries those changes instead.
+
+- In the source, each moved node is created again from its `delete` row, as 17.4 does; the links
+  its `delete` rows of `link_history` name are made again when both nodes exist; its properties
+  and the moved folders are copied back from the target.
+- In the target, the moved nodes are removed as a purge removes them (17.7): their rows of
+  `nodes`, `history` and `link_history`, attachments (and blobs nobody else uses), positions,
+  folders in `sync/`, and the moved folders. This is the one case where undo deletes rows of
+  `history`: content that goes back must not stay in the space it was moved to, which other people
+  may read.
+
+A crash between the two transactions of a move or of its undo leaves the nodes in both spaces,
+never in neither. A writer that fails to write the source removes what it wrote in the target.
 
 ## 18. Typed links and views
 
